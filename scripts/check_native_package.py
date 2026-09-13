@@ -109,7 +109,10 @@ def validate(
         if not any(jarvis.glob(f"{name}.cpython-*.so")):
             problems.append(f"missing compiled module: {name}")
     for grammar in GRAMMARS:
-        if not any(internal.glob(f"tree_sitter_{grammar}*.so")):
+        # Current tree-sitter language wheels ship as packages containing a
+        # binding extension; older wheels shipped a single flat extension.
+        binding = internal / f"tree_sitter_{grammar}" / "_binding.abi3.so"
+        if not (any(internal.glob(f"tree_sitter_{grammar}*.so")) or binding.is_file()):
             problems.append(f"missing tree-sitter library: {grammar}")
 
     for source in sorted(jarvis.rglob("*.py")):

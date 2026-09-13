@@ -222,3 +222,14 @@ def test_cli_reports_validation_problem(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(checker, "file_type", lambda _path: "Mach-O arm64")
     assert checker.main([str(archive), "--platform", "darwin_arm64"]) == 1
     assert "missing executable launcher" in capsys.readouterr().err
+
+
+def test_accepts_tree_sitter_package_layout(tmp_path):
+    root = valid_tree(tmp_path)
+    internal = root / "libexec" / "_internal"
+    for grammar in checker.GRAMMARS:
+        (internal / f"tree_sitter_{grammar}.so").unlink()
+        package = internal / f"tree_sitter_{grammar}"
+        package.mkdir()
+        (package / "_binding.abi3.so").write_bytes(b"grammar")
+    assert checker.validate(root, "darwin_arm64", injected_types(root)) == []
