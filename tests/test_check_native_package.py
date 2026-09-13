@@ -233,3 +233,23 @@ def test_accepts_tree_sitter_package_layout(tmp_path):
         package.mkdir()
         (package / "_binding.abi3.so").write_bytes(b"grammar")
     assert checker.validate(root, "darwin_arm64", injected_types(root)) == []
+
+
+def test_rejects_missing_java_even_when_javascript_remains(tmp_path):
+    root = valid_tree(tmp_path)
+    internal = root / "libexec" / "_internal"
+    (internal / "tree_sitter_java.so").unlink()
+    problems = checker.validate(root, "darwin_arm64", injected_types(root))
+    assert "missing tree-sitter library: java" in problems
+    assert "missing tree-sitter library: javascript" not in problems
+
+
+def test_accepts_any_binding_extension_in_package_layout(tmp_path):
+    root = valid_tree(tmp_path)
+    internal = root / "libexec" / "_internal"
+    for grammar in checker.GRAMMARS:
+        (internal / f"tree_sitter_{grammar}.so").unlink()
+        package = internal / f"tree_sitter_{grammar}"
+        package.mkdir()
+        (package / "_binding.cpython-312-darwin.so").write_bytes(b"grammar")
+    assert checker.validate(root, "darwin_arm64", injected_types(root)) == []

@@ -109,10 +109,16 @@ def validate(
         if not any(jarvis.glob(f"{name}.cpython-*.so")):
             problems.append(f"missing compiled module: {name}")
     for grammar in GRAMMARS:
-        # Current tree-sitter language wheels ship as packages containing a
-        # binding extension; older wheels shipped a single flat extension.
-        binding = internal / f"tree_sitter_{grammar}" / "_binding.abi3.so"
-        if not (any(internal.glob(f"tree_sitter_{grammar}*.so")) or binding.is_file()):
+        stem = f"tree_sitter_{grammar}"
+        # Boundary-safe matching: tree_sitter_java must not be satisfied by
+        # tree_sitter_javascript. Current wheels ship as packages containing
+        # a binding extension; older wheels shipped a single flat extension.
+        flat = [
+            path
+            for path in internal.glob(f"{stem}*.so")
+            if path.name == f"{stem}.so" or path.name.startswith(f"{stem}.")
+        ]
+        if not (flat or any((internal / stem).glob("_binding*.so"))):
             problems.append(f"missing tree-sitter library: {grammar}")
 
     for source in sorted(jarvis.rglob("*.py")):
