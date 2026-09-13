@@ -11,7 +11,7 @@ jarvis_spec = importlib.util.find_spec("jarvis")
 if jarvis_spec is None or jarvis_spec.submodule_search_locations is None:
     raise RuntimeError("install the compiled wheel before running PyInstaller")
 package_root = Path(next(iter(jarvis_spec.submodule_search_locations)))
-launcher = Path(__file__).with_name("launcher.py")
+launcher = Path(SPECPATH) / "launcher.py"
 grammars = (
     "python", "javascript", "typescript", "java", "kotlin", "swift", "go",
     "ruby", "rust", "c", "cpp", "c_sharp", "php", "scala", "bash", "sql",
