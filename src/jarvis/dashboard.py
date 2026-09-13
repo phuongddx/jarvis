@@ -46,6 +46,15 @@ _semantic_worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_n
 _semantic_gate = threading.Semaphore(1)
 
 
+class DashboardError(Exception):
+    """Handler-level failure carrying its HTTP status."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 def _guarded_semantic(fn):
     """Run an embedding-touching callable on the serialized semantic worker.
     Two bounds: a non-blocking gate rejects a second query while one is in
@@ -87,15 +96,6 @@ _TOOL_NAMES = {
 }
 
 
-
-
-class DashboardError(Exception):
-    """Handler-level failure carrying its HTTP status."""
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
 
 
 def assets_bytes(name: str) -> bytes:
