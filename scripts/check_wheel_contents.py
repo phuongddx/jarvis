@@ -4,8 +4,8 @@ assets, and no readable source.
 The compiled-wheel pipeline can silently regress to publishing readable
 source (JARVIS_COMPILE unset in CI, the build_py override dropped, a Cython
 .c intermediate packaged by accident), and a package-data regression can
-silently drop the dashboard assets. publish-pypi.yml runs this over every
-built wheel before upload; an empty report is the only green path.
+silently drop the dashboard assets. Run this over every built wheel before
+publication; an empty report is the only green path.
 """
 
 import sys

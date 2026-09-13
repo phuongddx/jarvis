@@ -1,21 +1,10 @@
-"""Assert every file declaring the release version agrees.
+"""Assert the local release version in pyproject.toml is readable.
 
-Three declarations carry the release version and must be identical:
-
-    pyproject.toml                     [project] version
-    server.json                        version
-    server.json                        packages[0].version
-
-The Claude Code and Codex plugins are NOT checked here: their source of
-truth lives in jarvis-intelligence/jarvis-index (plugin/.claude-plugin/
-plugin.json and .codex-plugin/plugin.json there), where they version
-independently of the PyPI package. The plugin's .mcp.json floor is a
-compatibility minimum against PyPI, maintained by hand in that repo.
+pyproject.toml is the only local release-version source.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 import tomllib
 from pathlib import Path
@@ -24,26 +13,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def read_declared_versions(root: Path) -> dict[str, str]:
-    """Map a human-readable location -> the version string declared there."""
+    """Map the sole local release-version declaration to its value."""
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
-    server = json.loads((root / "server.json").read_text())
     return {
-        "pyproject.toml [project] version": pyproject["project"]["version"],
-        "server.json version": server["version"],
-        "server.json packages[0].version": server["packages"][0]["version"],
+        "pyproject.toml [project].version": pyproject["project"]["version"]
     }
 
 
 def check(root: Path) -> list[str]:
-    """Return a list of problems. An empty list means everything agrees."""
-    problems: list[str] = []
-
-    declared = read_declared_versions(root)
-    if len(set(declared.values())) > 1:
-        detail = "\n".join(f"    {where}: {what}" for where, what in declared.items())
-        problems.append(f"release version differs between files:\n{detail}")
-
-    return problems
+    """Return problems; an empty list means the version is readable."""
+    try:
+        declared = read_declared_versions(root)
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
+        return [f"could not read release version: {exc}"]
+    if len(declared) != 1:
+        return ["expected exactly one local release version declaration"]
+    return []
 
 
 def main() -> int:
