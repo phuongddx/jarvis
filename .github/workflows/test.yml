@@ -72,7 +72,7 @@ jobs:
       - name: Install the project
         run: |
           set -eu
-          uv sync --extra semantic
+          uv sync --extra semantic --group native
 
       - name: Confirm the interpreter under test
         run: |

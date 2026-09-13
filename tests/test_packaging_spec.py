@@ -7,6 +7,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+from PyInstaller.utils import hooks as pyinstaller_hooks
+
 SPEC = Path(__file__).resolve().parents[1] / "packaging" / "jarvis.spec"
 
 
@@ -27,6 +29,7 @@ def stub_api() -> dict[str, object]:
         "PYZ": passthrough,
         "EXE": passthrough,
         "COLLECT": passthrough,
+        "copy_metadata": lambda name: [],
     }
 
 
@@ -110,6 +113,7 @@ def test_datas_include_grammar_distribution_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(
         importlib.metadata, "distribution", fake_distribution(tmp_path)
     )
+    monkeypatch.setattr(pyinstaller_hooks, "copy_metadata", lambda name: [])
     monkeypatch.setenv("JARVIS_NATIVE_BIN_DIR", str(tmp_path / "native"))
     namespace: dict[str, object] = {"SPECPATH": str(SPEC.parent), **stub_api()}
     exec(compile(SPEC.read_bytes(), str(SPEC), "exec"), namespace)
@@ -117,3 +121,42 @@ def test_datas_include_grammar_distribution_metadata(monkeypatch, tmp_path):
     assert "tree_sitter-1.2.3.dist-info" in dests
     assert "tree_sitter_python-1.2.3.dist-info" in dests
     assert "tree_sitter_c_sharp-1.2.3.dist-info" in dests
+
+
+def test_datas_include_jarvis_distribution_metadata(monkeypatch, tmp_path):
+    package_root = tmp_path / "site-packages" / "jarvis"
+    package_root.mkdir(parents=True)
+    fake_spec = SimpleNamespace(submodule_search_locations=[str(package_root)])
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: fake_spec if name == "jarvis" else None,
+    )
+    monkeypatch.setenv("JARVIS_NATIVE_BIN_DIR", str(tmp_path / "native"))
+    monkeypatch.setattr(
+        pyinstaller_hooks,
+        "copy_metadata",
+        lambda name: [
+            (
+                str(tmp_path / f"{name.replace('-', '_')}-0.10.0.dist-info"),
+                f"{name.replace('-', '_')}-0.10.0.dist-info",
+            )
+        ],
+    )
+    namespace: dict[str, object] = {
+        "SPECPATH": str(SPEC.parent),
+        **stub_api(),
+    }
+    exec(compile(SPEC.read_bytes(), str(SPEC), "exec"), namespace)
+    assert (
+        str(tmp_path / "jarvis_mcp-0.10.0.dist-info"),
+        "jarvis_mcp-0.10.0.dist-info",
+    ) in namespace["datas"]
+
+
+def test_build_excludes_package_and_build_tooling(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_NATIVE_BIN_DIR", str(tmp_path / "native"))
+    namespace: dict[str, object] = {"SPECPATH": str(SPEC.parent), **stub_api()}
+    exec(compile(SPEC.read_bytes(), str(SPEC), "exec"), namespace)
+    excludes = namespace["excludes"]
+    assert {"setuptools", "wheel", "Cython"} <= set(excludes)

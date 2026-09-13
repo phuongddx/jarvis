@@ -77,6 +77,102 @@ def test_semantic_assertion_rejects_uv_install_hint():
         smoke.assert_semantic_unavailable(response)
 
 
+def test_exact_version_assertion_rejects_unknown_and_mismatch():
+    smoke.assert_exact_version("jarvis 0.10.0\n", "0.10.0")
+
+    for output in ("jarvis unknown\n", "jarvis 0.9.9\n"):
+        with pytest.raises(RuntimeError, match="unexpected version"):
+            smoke.assert_exact_version(output, "0.10.0")
+
+
+def test_help_assertion_rejects_empty_output():
+    smoke.assert_help_output("usage: jarvis [-h]\n")
+
+    with pytest.raises(RuntimeError, match="unexpected help output"):
+        smoke.assert_help_output("")
+
+
+def test_dashboard_asset_assertion_checks_response_shape():
+    smoke.assert_dashboard_asset(
+        "/",
+        200,
+        "text/html; charset=utf-8",
+        "<!doctype html><html></html>",
+    )
+    smoke.assert_dashboard_asset(
+        "/style.css",
+        200,
+        "text/css; charset=utf-8",
+        "body { color: red }",
+    )
+
+    with pytest.raises(RuntimeError, match="/ returned HTTP 500"):
+        smoke.assert_dashboard_asset("/", 500, "text/html", "<html></html>")
+    with pytest.raises(RuntimeError, match="/ has content type"):
+        smoke.assert_dashboard_asset("/", 200, "text/plain", "<html></html>")
+    with pytest.raises(RuntimeError, match="/ returned an empty body"):
+        smoke.assert_dashboard_asset("/", 200, "text/html", "")
+
+
+def test_cli_passes_exact_expected_version_to_smoke(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_smoke(root, repo, data_dir, expected_version):
+        calls.append((root, repo, data_dir, expected_version))
+
+    monkeypatch.setattr(smoke, "run_smoke", fake_run_smoke)
+
+    result = smoke.main(
+        [
+            "--root", str(tmp_path / "root"),
+            "--repo", str(tmp_path / "repo"),
+            "--data-dir", str(tmp_path / "data"),
+            "--expected-version", "0.10.0",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        (tmp_path / "root", tmp_path / "repo", tmp_path / "data", "0.10.0")
+    ]
+
+
+def test_dashboard_cleanup_terminates_then_kills_the_process_group():
+    events: list[str] = []
+
+    class Process:
+        pid = 7321
+        exited = False
+        killed = False
+
+        def poll(self):
+            return 15 if self.exited else None
+
+        def wait(self, timeout=None):
+            if self.exited:
+                return 15
+            events.append("wait")
+            self.exited = self.killed
+            if not self.exited:
+                raise smoke.subprocess.TimeoutExpired(
+                    cmd="jarvis dashboard", timeout=timeout
+                )
+            return 15
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+
+    def signal_group(target, number):
+        assert target is process
+        events.append(f"signal:{number.name}")
+
+    smoke.stop_dashboard_process(process, signal_group=signal_group)
+
+    assert events == ["signal:SIGTERM", "wait", "signal:SIGKILL", "wait"]
+
+
 def test_mcp_close_closes_stdin_before_terminating_process_group():
     client = object.__new__(smoke.McpStdioClient)
     events: list[str] = []

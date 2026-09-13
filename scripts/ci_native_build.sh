@@ -33,13 +33,15 @@ inside_build() {
              .native-release/app .native-release/release
 
     uv sync --group native
-    uv run pytest -m "not integration" -rs
+    uv run pytest -m "not integration" --ignore=tests/test_setup_sh.py -rs
     JARVIS_COMPILE=1 uv build --python "$UV_PYTHON" --wheel \
         --out-dir .native-release/wheels
 
     uv venv --python "$UV_PYTHON" .native-release/package
     uv pip install --python .native-release/package/bin/python \
         .native-release/wheels/jarvis_mcp-*.whl 'watchdog>=4' pyinstaller==6.14.1
+    uv pip uninstall --python .native-release/package/bin/python \
+        setuptools wheel Cython
 
     uv run python scripts/fetch_native_binaries.py \
         --platform "$platform" --output .native-release/native
@@ -56,7 +58,7 @@ inside_build() {
         --platform "$platform"
     uv run python scripts/check_native_package.py \
         ".native-release/release/jarvis_${version}_${platform}.tar.gz" \
-        --platform "$platform"
+        --platform "$platform" --version "$version"
 }
 
 if [ "$INSIDE" -eq 1 ]; then

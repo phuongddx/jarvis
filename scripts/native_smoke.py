@@ -17,11 +17,15 @@ from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
 
 MCP_TIMEOUT_SECONDS = 30.0
 PROCESS_STOP_TIMEOUT_SECONDS = 5.0
 COMMAND_TIMEOUT_SECONDS = 300.0
 WATCH_PROBE_SECONDS = 1.0
+DASHBOARD_TIMEOUT_SECONDS = 15.0
+DASHBOARD_POLL_SECONDS = 0.2
+HTTP_TIMEOUT_SECONDS = 2.0
 
 
 def jsonrpc_line(payload: dict[str, object]) -> str:
@@ -55,6 +59,37 @@ def assert_semantic_unavailable(response: dict[str, Any]) -> None:
             "frozen semanticSearch error unexpectedly mentions uv: "
             f"{body!r}"
         )
+
+
+def assert_exact_version(output: str, expected_version: str) -> None:
+    actual = f"jarvis {expected_version}"
+    if output.strip() != actual:
+        raise RuntimeError(
+            f"unexpected version output: expected {actual!r}, got {output.strip()!r}"
+        )
+
+
+def assert_help_output(output: str) -> None:
+    if not output.strip() or "usage: jarvis" not in output:
+        raise RuntimeError(f"unexpected help output: {output!r}")
+
+
+def assert_dashboard_asset(
+    path: str, status: int, content_type: str, body: str
+) -> None:
+    if status != 200:
+        raise RuntimeError(f"{path} returned HTTP {status}")
+    expected_type = "text/html" if path == "/" else "text/css"
+    if not content_type.startswith(expected_type):
+        raise RuntimeError(
+            f"{path} has content type {content_type!r}, expected {expected_type!r}"
+        )
+    if not body:
+        raise RuntimeError(f"{path} returned an empty body")
+    if path == "/" and "<html" not in body.lower():
+        raise RuntimeError(f"{path} did not return HTML")
+    if path == "/style.css" and not body.strip().endswith("}"):
+        raise RuntimeError(f"{path} did not return CSS")
 
 
 class McpStdioClient:
@@ -245,10 +280,14 @@ def native_environment(root: Path, data_dir: Path) -> dict[str, str]:
     env["PATH"] = os.pathsep.join(paths)
     # The smoke must not share the default Zoekt port with an unrelated
     # jarvis/zoekt-webserver already running on this machine.
+    env["JARVIS_ZOEKT_PORT"] = str(free_port())
+    return env
+
+
+def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        env["JARVIS_ZOEKT_PORT"] = str(probe.getsockname()[1])
-    return env
+        return int(probe.getsockname()[1])
 
 
 def run_checked(
@@ -299,6 +338,31 @@ def stop_watch_process(process: subprocess.Popen[bytes]) -> None:
         raise RuntimeError("watch child did not exit after SIGKILL") from exc
 
 
+def stop_dashboard_process(
+    process: subprocess.Popen[Any],
+    signal_group=lambda process, number: os.killpg(process.pid, number),
+) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        signal_group(process, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    signal_group(process, signal.SIGKILL)
+    process.kill()
+    try:
+        process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "dashboard child did not exit after SIGKILL"
+        ) from exc
+
+
 def probe_watch(jarvis: str, repo: Path, env: dict[str, str]) -> None:
     process = subprocess.Popen(
         [jarvis, "watch", str(repo), "--slug", "native-smoke", "--debounce", "5"],
@@ -318,6 +382,55 @@ def probe_watch(jarvis: str, repo: Path, env: dict[str, str]) -> None:
         stop_watch_process(process)
 
 
+def fetch_dashboard_asset(url: str) -> tuple[int, str, str]:
+    with urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        return (
+            int(response.status),
+            response.headers.get_content_type(),
+            response.read().decode("utf-8"),
+        )
+
+
+def probe_dashboard(jarvis: str, env: dict[str, str]) -> None:
+    port = free_port()
+    process = subprocess.Popen(
+        [jarvis, "dashboard", "--no-open", "--port", str(port)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + DASHBOARD_TIMEOUT_SECONDS
+        responses = []
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    "jarvis dashboard exited before responding "
+                    f"(return code {process.returncode})"
+                )
+            try:
+                responses = [
+                    fetch_dashboard_asset(f"http://127.0.0.1:{port}/"),
+                    fetch_dashboard_asset(
+                        f"http://127.0.0.1:{port}/style.css"
+                    ),
+                ]
+                break
+            except OSError:
+                time.sleep(DASHBOARD_POLL_SECONDS)
+        else:
+            raise RuntimeError(
+                "jarvis dashboard did not respond within "
+                f"{DASHBOARD_TIMEOUT_SECONDS:g}s"
+            )
+        for path, response in zip(("/", "/style.css"), responses):
+            assert_dashboard_asset(path, *response)
+    finally:
+        stop_dashboard_process(process)
+
+
 def call_tool(
     client: McpStdioClient, identifier: int, name: str, arguments: dict[str, object]
 ) -> dict[str, Any]:
@@ -328,7 +441,9 @@ def call_tool(
     )
 
 
-def run_smoke(root: Path, repo: Path, data_dir: Path) -> None:
+def run_smoke(
+    root: Path, repo: Path, data_dir: Path, expected_version: str
+) -> None:
     root = root.resolve()
     repo = repo.resolve()
     data_dir = data_dir.resolve()
@@ -339,11 +454,13 @@ def run_smoke(root: Path, repo: Path, data_dir: Path) -> None:
     jarvis_server = str(root / "bin" / "jarvis-server")
 
     version = run_checked(jarvis, ["--version"], env)
-    if "jarvis" not in version.stdout:
-        raise RuntimeError(f"unexpected version output: {version.stdout!r}")
+    assert_exact_version(version.stdout, expected_version)
+    help_output = run_checked(jarvis, ["--help"], env)
+    assert_help_output(help_output.stdout)
 
     run_checked(jarvis, ["index", str(repo), "--slug", "native-smoke"], env)
     probe_watch(jarvis, repo, env)
+    probe_dashboard(jarvis, env)
 
     client = McpStdioClient(jarvis_server, env)
     try:
@@ -397,10 +514,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--data-dir", required=True, type=Path)
+    parser.add_argument("--expected-version", required=True)
     args = parser.parse_args(argv)
 
     try:
-        run_smoke(args.root, args.repo, args.data_dir)
+        run_smoke(
+            args.root, args.repo, args.data_dir, args.expected_version
+        )
     except Exception as exc:
         print(f"native smoke: FAIL: {exc}", file=sys.stderr)
         return 1

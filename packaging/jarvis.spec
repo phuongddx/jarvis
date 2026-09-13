@@ -8,6 +8,8 @@ import importlib.util
 import os
 from pathlib import Path
 
+from PyInstaller.utils.hooks import copy_metadata
+
 native_bin = Path(os.environ["JARVIS_NATIVE_BIN_DIR"])
 jarvis_spec = importlib.util.find_spec("jarvis")
 if jarvis_spec is None or jarvis_spec.submodule_search_locations is None:
@@ -26,7 +28,10 @@ compiled_modules = sorted(
     path.name.split(".", 1)[0]
     for path in package_root.glob("*.cpython-*.so")
 )
-excludes = ("lancedb", "sentence_transformers", "torch")
+excludes = (
+    "lancedb", "sentence_transformers", "torch",
+    "setuptools", "wheel", "Cython",
+)
 source_root = Path(SPECPATH).parent / "src" / "jarvis"
 source_imports: set[str] = set()
 for source in source_root.glob("*.py"):
@@ -64,6 +69,7 @@ metadata_names = [
 for metadata_name in metadata_names:
     dist_info = Path(importlib.metadata.distribution(metadata_name)._path)
     datas.append((str(dist_info), dist_info.name))
+datas.extend(copy_metadata("jarvis-mcp"))
 
 a = Analysis(
     [str(launcher)], pathex=[], binaries=binaries, datas=datas,

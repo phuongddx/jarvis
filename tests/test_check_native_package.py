@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import tarfile
 from pathlib import Path
 
@@ -16,13 +17,21 @@ spec.loader.exec_module(checker)
 
 def valid_tree(parent: Path) -> Path:
     root = parent / "jarvis"
+    bin_dir = root / "bin"
     internal = root / "libexec" / "_internal"
     jarvis = internal / "jarvis"
     native = internal / "native-bin"
     assets = jarvis / "dashboard_assets"
     jarvis.mkdir(parents=True)
+    bin_dir.mkdir()
     native.mkdir()
     assets.mkdir()
+    metadata = internal / "jarvis_mcp-0.10.0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text(
+        "Name: jarvis-mcp\nVersion: 0.10.0\n"
+    )
+    (metadata / "WHEEL").write_text("Wheel-Version: 1.0\n")
     for name in ("index.html", "app.js", "style.css"):
         (assets / name).write_text(name)
     for name in ("query", "syntax", "index_cli", "server", "dashboard"):
@@ -31,6 +40,7 @@ def valid_tree(parent: Path) -> Path:
         path = native / name
         path.write_text("#!/bin/sh\n")
         path.chmod(0o755)
+    (internal / "tree_sitter.so").write_bytes(b"runtime")
     for grammar in checker.GRAMMARS:
         (internal / f"tree_sitter_{grammar}.so").write_bytes(b"grammar")
     (jarvis / "__init__.py").write_text("")
@@ -38,6 +48,8 @@ def valid_tree(parent: Path) -> Path:
     launcher = root / "libexec" / "jarvis"
     launcher.write_text("#!/bin/sh\n")
     launcher.chmod(0o755)
+    for name in ("jarvis", "jarvis-server"):
+        (bin_dir / name).symlink_to("../libexec/jarvis")
     return root
 
 
@@ -52,7 +64,17 @@ def binary_paths(root: Path) -> tuple[Path, ...]:
 
 
 def injected_types(root: Path, architecture: str = "arm64") -> dict[Path, str]:
-    return {path: f"Mach-O {architecture}" for path in binary_paths(root)}
+    return {
+        path: f"Mach-O {architecture}"
+        for path in native_paths(root)
+    }
+
+
+def native_paths(root: Path) -> tuple[Path, ...]:
+    return (
+        *binary_paths(root),
+        *(path for path in root.rglob("*.so") if path.is_file()),
+    )
 
 
 def test_valid_tree_passes_with_injected_file_types(tmp_path):
@@ -64,7 +86,7 @@ def test_linux_amd64_accepts_gnu_hyphenated_file_description(tmp_path):
     root = valid_tree(tmp_path)
     types = {
         path: "ELF 64-bit LSB pie executable, x86-64, dynamically linked"
-        for path in binary_paths(root)
+        for path in native_paths(root)
     }
     problems = checker.validate(root, "linux_amd64", types)
     assert [problem for problem in problems if "architecture" in problem] == []
@@ -91,6 +113,25 @@ def test_rejects_missing_native_binary_and_wrong_launcher_architecture(tmp_path)
     problems = checker.validate(root, "darwin_arm64", types)
     assert any("missing executable native binary: scip" in p for p in problems)
     assert any("wrong architecture" in problem for problem in problems)
+
+
+def test_rejects_missing_or_mispointed_public_names(tmp_path):
+    root = valid_tree(tmp_path)
+    bin_dir = root / "bin"
+    (bin_dir / "jarvis").unlink()
+    (bin_dir / "jarvis-server").unlink()
+    (bin_dir / "jarvis").write_text("#!/bin/sh\n")
+    (bin_dir / "jarvis").chmod(0o755)
+    (bin_dir / "jarvis-server").symlink_to("../libexec/jarvis-server")
+
+    problems = checker.validate(root, "darwin_arm64", injected_types(root))
+
+    assert any("missing jarvis symlink" in problem for problem in problems)
+    assert any(
+        "jarvis-server symlink must target ../libexec/jarvis"
+        in problem
+        for problem in problems
+    )
 
 
 @pytest.mark.parametrize("binary_name", ["jarvis", *checker.REQUIRED_NATIVE])
@@ -125,12 +166,60 @@ def test_rejects_missing_compiled_module(tmp_path):
     assert any("missing compiled module: query" in problem for problem in problems)
 
 
+def test_rejects_missing_jarvis_distribution_metadata(tmp_path):
+    root = valid_tree(tmp_path)
+    metadata = next(
+        (root / "libexec" / "_internal").glob("jarvis_mcp-*.dist-info")
+    )
+    shutil.rmtree(metadata)
+
+    problems = checker.validate(root, "darwin_arm64", injected_types(root))
+
+    assert any(
+        "missing jarvis-mcp distribution metadata" in problem
+        for problem in problems
+    )
+
+
+def test_rejects_metadata_version_mismatch(tmp_path):
+    root = valid_tree(tmp_path)
+    metadata = next(
+        (root / "libexec" / "_internal").glob("jarvis_mcp-*.dist-info")
+    )
+    (metadata / "METADATA").write_text(
+        "Name: jarvis-mcp\nVersion: 0.9.9\n"
+    )
+
+    problems = checker.validate(
+        root, "darwin_arm64", injected_types(root), expected_version="0.10.0"
+    )
+
+    assert any(
+        "jarvis-mcp metadata version is 0.9.9, expected 0.10.0"
+        in problem
+        for problem in problems
+    )
+
+
 def test_rejects_missing_tree_sitter_grammar(tmp_path):
     root = valid_tree(tmp_path)
     internal = root / "libexec" / "_internal"
     next(internal.glob("tree_sitter_kotlin*.so")).unlink()
     problems = checker.validate(root, "darwin_arm64", injected_types(root))
     assert any("missing tree-sitter library: kotlin" in problem for problem in problems)
+
+
+def test_rejects_missing_tree_sitter_runtime(tmp_path):
+    root = valid_tree(tmp_path)
+    internal = root / "libexec" / "_internal"
+    (internal / "tree_sitter.so").unlink()
+
+    problems = checker.validate(root, "darwin_arm64", injected_types(root))
+
+    assert any(
+        "missing tree-sitter runtime library" in problem
+        for problem in problems
+    )
 
 
 def test_rejects_readable_jarvis_source(tmp_path):
@@ -180,6 +269,54 @@ def test_rejects_bundled_package_manager_executable(tmp_path):
     )
 
 
+def test_rejects_build_tooling_without_substring_false_positives(tmp_path):
+    root = valid_tree(tmp_path)
+    internal = root / "libexec" / "_internal"
+    for name in ("setuptools", "wheel", "Cython"):
+        (internal / f"{name}-1.0.dist-info").mkdir()
+    (internal / "uvloop-1.0.dist-info").mkdir()
+    (internal / "pipeline.txt").write_text("mentions pip and uv only in text")
+
+    problems = checker.validate(root, "darwin_arm64", injected_types(root))
+
+    for name in ("setuptools", "wheel", "Cython"):
+        assert any(f"bundled build tool: {name}" in p for p in problems)
+    assert not any("uvloop" in problem for problem in problems)
+    assert not any("pipeline.txt" in problem for problem in problems)
+
+
+def test_rejects_wrong_architecture_for_bundled_loadable_object(tmp_path):
+    root = valid_tree(tmp_path)
+    binding = root / "libexec" / "_internal" / "tree_sitter_python.so"
+    types = injected_types(root)
+    types[binding] = "Mach-O x86_64"
+
+    problems = checker.validate(root, "darwin_arm64", types)
+
+    assert any(
+        f"wrong architecture for darwin_arm64: {binding}" in problem
+        for problem in problems
+    )
+
+
+def test_rejects_wrong_architecture_for_extensionless_native_runtime(
+    tmp_path,
+):
+    root = valid_tree(tmp_path)
+    runtime = root / "libexec" / "_internal" / "Python"
+    runtime.write_bytes(b"runtime")
+    runtime.chmod(0o755)
+    types = injected_types(root)
+    types[runtime] = "Mach-O x86_64"
+
+    problems = checker.validate(root, "darwin_arm64", types)
+
+    assert any(
+        f"wrong architecture for darwin_arm64: {runtime}" in problem
+        for problem in problems
+    )
+
+
 def test_rejects_each_bundled_language_indexer(tmp_path):
     assert checker.FORBIDDEN_LANGUAGE_INDEXERS == (
         "scip-python", "scip-typescript", "scip-java", "scip-swift",
@@ -202,14 +339,16 @@ def test_cli_extracts_and_validates_archive(tmp_path, monkeypatch, capsys):
         tar.add(root, arcname="jarvis")
 
     def fake_file_type(path: Path) -> str:
-        if Path(path).name in {
+        if Path(path).suffix in {".so", ".dylib"} or Path(path).name in {
             "jarvis", *checker.REQUIRED_NATIVE,
         }:
             return "Mach-O arm64"
         return "script"
 
     monkeypatch.setattr(checker, "file_type", fake_file_type)
-    assert checker.main([str(archive), "--platform", "darwin_arm64"]) == 0
+    assert checker.main(
+        [str(archive), "--platform", "darwin_arm64", "--version", "0.10.0"]
+    ) == 0
     assert capsys.readouterr().out == "native package: PASS\n"
 
 
@@ -220,7 +359,9 @@ def test_cli_reports_validation_problem(tmp_path, monkeypatch, capsys):
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(root, arcname="jarvis")
     monkeypatch.setattr(checker, "file_type", lambda _path: "Mach-O arm64")
-    assert checker.main([str(archive), "--platform", "darwin_arm64"]) == 1
+    assert checker.main(
+        [str(archive), "--platform", "darwin_arm64", "--version", "0.10.0"]
+    ) == 1
     assert "missing executable launcher" in capsys.readouterr().err
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tarfile
@@ -16,8 +17,10 @@ GRAMMARS = (
 REQUIRED_NATIVE = ("scip", "zoekt-git-index", "zoekt-webserver")
 REQUIRED_MODULES = ("query", "syntax", "index_cli", "server", "dashboard")
 REQUIRED_ASSETS = ("index.html", "app.js", "style.css")
+PACKAGE_NAME = "jarvis-mcp"
 FORBIDDEN_SEMANTIC = ("lancedb", "sentence_transformers", "torch")
 FORBIDDEN_PACKAGE_MANAGERS = ("uv", "uvx", "pip", "pip3")
+FORBIDDEN_BUILD_TOOLS = ("setuptools", "wheel", "Cython")
 FORBIDDEN_LANGUAGE_INDEXERS = (
     "scip-python", "scip-typescript", "scip-java", "scip-swift",
 )
@@ -28,6 +31,7 @@ ARCH_PATTERNS = {
     "linux_arm64": ("ELF", "aarch64"),
     "linux_amd64": ("ELF", "x86_64"),
 }
+LOADABLE_SUFFIXES = {".so", ".dylib"}
 
 
 def is_executable(path: Path) -> bool:
@@ -47,7 +51,7 @@ def _architecture_problems(
     expected_format, expected_arch = ARCH_PATTERNS[platform]
     descriptions: dict[Path, str] = {}
     for path in binaries:
-        if not is_executable(path):
+        if not path.exists() and not path.is_symlink():
             continue
         if file_types is not None and path in file_types:
             descriptions[path] = file_types[path]
@@ -79,8 +83,99 @@ def _bundled_paths(root: Path, names: tuple[str, ...]) -> dict[str, list[Path]]:
     }
 
 
+def _tree_sitter_paths(internal: Path, stem: str) -> list[Path]:
+    flat = [
+        path
+        for path in internal.glob(f"{stem}*.so")
+        if path.name == f"{stem}.so" or path.name.startswith(f"{stem}.")
+    ]
+    return flat or list((internal / stem).glob("_binding*.so"))
+
+
+def _metadata_problems(internal: Path, expected_version: str | None) -> list[str]:
+    distributions = list(internal.glob("jarvis_mcp-*.dist-info"))
+    if len(distributions) != 1:
+        return [
+            "missing jarvis-mcp distribution metadata"
+            if not distributions
+            else f"multiple jarvis-mcp metadata directories: {distributions}"
+        ]
+
+    metadata = distributions[0] / "METADATA"
+    if not metadata.is_file():
+        return [f"missing jarvis-mcp METADATA file: {metadata}"]
+
+    fields: dict[str, str] = {}
+    for line in metadata.read_text(encoding="utf-8").splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key.lower() in {"name", "version"} and key.lower() not in fields:
+            fields[key.lower()] = value.strip()
+
+    problems: list[str] = []
+    if fields.get("name") != PACKAGE_NAME:
+        problems.append(
+            "invalid jarvis-mcp metadata name: "
+            f"{fields.get('name')!r}"
+        )
+    actual_version = fields.get("version")
+    if not actual_version:
+        problems.append("jarvis-mcp metadata has no Version field")
+    elif expected_version is not None and actual_version != expected_version:
+        problems.append(
+            f"jarvis-mcp metadata version is {actual_version}, "
+            f"expected {expected_version}"
+        )
+    return problems
+
+
+def _matches_distribution_name(path: Path, name: str) -> bool:
+    normalized = path.name.lower()
+    target = name.lower()
+    if normalized.startswith(f"{target}-"):
+        return normalized.endswith((".dist-info", ".egg-info"))
+    return normalized == target and (
+        path.is_dir() or is_executable(path)
+    )
+
+
+def _tooling_problems(root: Path) -> list[str]:
+    problems: list[str] = []
+    paths = [path for path in root.rglob("*") if path.exists() or path.is_symlink()]
+    for name in FORBIDDEN_PACKAGE_MANAGERS:
+        if any(
+            _matches_distribution_name(path, name)
+            for path in paths
+        ):
+            problems.append(f"bundled package manager executable: {name}")
+    for name in FORBIDDEN_BUILD_TOOLS:
+        if any(
+            _matches_distribution_name(path, name)
+            for path in paths
+        ):
+            problems.append(f"bundled build tool: {name}")
+    return problems
+
+
+def _native_loadable_paths(root: Path, executables: list[Path]) -> list[Path]:
+    paths = set(executables)
+    public_bin = root / "bin"
+    for path in root.rglob("*"):
+        if public_bin in path.parents:
+            continue
+        if path.is_file() and (
+            path.suffix in LOADABLE_SUFFIXES or is_executable(path)
+        ):
+            paths.add(path)
+    return sorted(paths)
+
+
 def validate(
-    root: Path, platform: str, file_types: dict[Path, str] | None = None
+    root: Path,
+    platform: str,
+    file_types: dict[Path, str] | None = None,
+    expected_version: str | None = None,
 ) -> list[str]:
     problems: list[str] = []
     if platform not in ARCH_PATTERNS:
@@ -90,6 +185,7 @@ def validate(
     jarvis = internal / "jarvis"
     assets = jarvis / "dashboard_assets"
     native_bin = internal / "native-bin"
+    bin_dir = root / "bin"
 
     launcher = root / "libexec" / "jarvis"
     if not is_executable(launcher):
@@ -102,24 +198,33 @@ def validate(
         if not is_executable(path):
             problems.append(f"missing executable native binary: {name}: {path}")
 
+    for name in ("jarvis", "jarvis-server"):
+        public_name = bin_dir / name
+        if not public_name.is_symlink():
+            problems.append(f"missing {name} symlink: {public_name}")
+        elif os.readlink(public_name) != "../libexec/jarvis":
+            problems.append(
+                f"{name} symlink must target ../libexec/jarvis: {public_name}"
+            )
+
     for name in REQUIRED_ASSETS:
         if not (assets / name).is_file():
             problems.append(f"missing dashboard asset: {name}")
     for name in REQUIRED_MODULES:
         if not any(jarvis.glob(f"{name}.cpython-*.so")):
             problems.append(f"missing compiled module: {name}")
-    for grammar in GRAMMARS:
-        stem = f"tree_sitter_{grammar}"
+    tree_sitter_targets = ["tree_sitter", *(f"tree_sitter_{g}" for g in GRAMMARS)]
+    for index, stem in enumerate(tree_sitter_targets):
         # Boundary-safe matching: tree_sitter_java must not be satisfied by
         # tree_sitter_javascript. Current wheels ship as packages containing
         # a binding extension; older wheels shipped a single flat extension.
-        flat = [
-            path
-            for path in internal.glob(f"{stem}*.so")
-            if path.name == f"{stem}.so" or path.name.startswith(f"{stem}.")
-        ]
-        if not (flat or any((internal / stem).glob("_binding*.so"))):
-            problems.append(f"missing tree-sitter library: {grammar}")
+        if not _tree_sitter_paths(internal, stem):
+            label = (
+                "tree-sitter runtime library"
+                if index == 0
+                else f"tree-sitter library: {GRAMMARS[index - 1]}"
+            )
+            problems.append(f"missing {label}")
 
     for source in sorted(jarvis.rglob("*.py")):
         relative = source.relative_to(jarvis)
@@ -131,17 +236,19 @@ def validate(
         if any(path.name.startswith(name) for path in root.rglob("*")):
             problems.append(f"bundled semantic dependency: {name}")
 
-    managers = _bundled_paths(root, FORBIDDEN_PACKAGE_MANAGERS)
-    for name, paths in managers.items():
-        if any(is_executable(path) for path in paths):
-            problems.append(f"bundled package manager executable: {name}")
+    problems.extend(_tooling_problems(root))
 
     indexers = _bundled_paths(root, FORBIDDEN_LANGUAGE_INDEXERS)
     for name, paths in indexers.items():
         if paths:
             problems.append(f"bundled language indexer: {name}: {paths[0]}")
 
-    problems.extend(_architecture_problems(binaries, platform, file_types))
+    problems.extend(_metadata_problems(internal, expected_version))
+    problems.extend(
+        _architecture_problems(
+            _native_loadable_paths(root, binaries), platform, file_types
+        )
+    )
     return problems
 
 
@@ -149,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
     parser.add_argument("--platform", required=True)
+    parser.add_argument("--version", required=True)
     args = parser.parse_args(argv)
 
     try:
@@ -156,7 +264,9 @@ def main(argv: list[str] | None = None) -> int:
             extracted = Path(temporary)
             with tarfile.open(args.archive, "r:gz") as tar:
                 tar.extractall(extracted, filter="data")
-            problems = validate(extracted / "jarvis", args.platform)
+            problems = validate(
+                extracted / "jarvis", args.platform, expected_version=args.version
+            )
     except (OSError, tarfile.TarError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

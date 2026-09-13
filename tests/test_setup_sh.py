@@ -49,6 +49,13 @@ def test_dash_is_available_for_honest_bashism_detection():
     )
 
 
+def test_setup_helper_is_documented_for_source_checkout_use():
+    content = SETUP_SH.read_text()
+    assert "raw.githubusercontent.com" not in content
+    assert "setup.sh | sh" not in content
+    assert "jarvis source checkout" in content
+
+
 def test_detect_os_maps_darwin():
     result = run_func('uname() { echo Darwin; }\ndetect_os')
     assert result.returncode == 0

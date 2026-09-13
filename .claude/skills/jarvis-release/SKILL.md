@@ -57,6 +57,11 @@ repository. Its release notes should tell users to run:
 brew install jarvis-intelligence/jarvis/jarvis
 ```
 
+`publish-native.yml` also accepts manual dispatch. A manual run executes only
+the four platform build and extracted-archive smoke jobs; it never stages tap
+release assets, validates or publishes Homebrew, or publishes the formula.
+Use a GitHub Release when the full publication chain is required.
+
 ## 3. Confirm the native publish pipeline
 
 Capture and watch the run:

@@ -2,10 +2,11 @@
 # jarvis dependency bootstrapper.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
+#   sh setup.sh --only <component>
 #
-# STRICTLY POSIX sh: `curl | sh` ignores the shebang above and runs under the
-# system sh (dash on many Linux distros). No arrays, no [[ ]], no bashisms.
+# Run this reduced helper from a jarvis source checkout. STRICTLY POSIX sh:
+# `sh setup.sh` ignores the shebang above and runs under the system sh (dash on
+# many Linux distros). No arrays, no [[ ]], no bashisms.
 
 set -eu
 
@@ -600,9 +601,7 @@ install_scip_python() {
 	install_npm_indexer scip-python @sourcegraph/scip-python
 }
 
-# Installs upstream's single-file launcher. Unattended: the old prompt existed
-# because the docker image is 6.75GB, and a TTY-gated question would make
-# `curl | sh` silently skip scip-java.
+# Installs upstream's single-file launcher without an interactive prompt.
 install_scip_java() {
 	if [ "${FORCE:-0}" != "1" ] && already_installed scip-java; then
 		log_info "scip-java: already installed, skipping"
@@ -642,9 +641,10 @@ usage() {
 	cat <<'EOF'
 Usage: setup.sh [options]
 
-Installs optional language indexers that are not bundled with jarvis's
-Homebrew distribution. jarvis, scip, zoekt, and universal-ctags are installed
-by: brew install jarvis-intelligence/jarvis/jarvis
+Run this reduced helper from a jarvis source checkout. It installs optional
+language indexers that are not bundled with jarvis's Homebrew distribution.
+jarvis, scip, zoekt, and universal-ctags are installed by:
+brew install jarvis-intelligence/jarvis/jarvis
 
 Options:
   --only <name>   Install just one component. One of:
