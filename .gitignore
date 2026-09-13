@@ -18,3 +18,6 @@ wheels/
 # Skill eval workspaces (benchmark output, not plugin content)
 evals/
 demo/.jarvis/
+
+# Local native packaging outputs
+.native-release/
