@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 
+from jarvis import runtime
+
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 DEFAULT_BATCH_SIZE = 8
@@ -28,6 +30,15 @@ _INSTALL_HINT = (
     "jarvis-mcp[semantic] (uv tool install, or uvx --from), "
     "or `uv sync --extra semantic` in a source checkout"
 )
+
+
+def semantic_install_hint() -> str:
+    if runtime.is_frozen():
+        return (
+            "semantic search is not included in the Homebrew binary "
+            "distribution"
+        )
+    return _INSTALL_HINT
 
 # Query/document instruction prefixes, by model. Matching is substring-based
 # so vendor-prefixed names resolve ("intfloat/multilingual-e5-large" matches
@@ -101,7 +112,7 @@ class EmbeddingModel:
             try:
                 from sentence_transformers import SentenceTransformer
             except ImportError as exc:
-                raise SemanticExtraMissingError(_INSTALL_HINT) from exc
+                raise SemanticExtraMissingError(semantic_install_hint()) from exc
             revision = None if self.revision == "unpinned" else self.revision
             self._model = SentenceTransformer(self.model_name, revision=revision,
                                               trust_remote_code=True)

@@ -5,6 +5,7 @@ CLI binaries (marked `@pytest.mark.integration` — skipped if unavailable).
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -4391,3 +4392,53 @@ def test_index_repo_releases_lock_on_failure(tmp_path, monkeypatch):
     with pytest.raises(Exception):
         index_cli.index_repo(repo_dir)
     assert jobs.lock_state(config.repo_slug(repo_dir.name)).held is False
+
+
+def test_version_flag_reports_distribution_version(capsys):
+    from jarvis import index_cli as cli
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--version"])
+    assert raised.value.code == 0
+    assert "jarvis " in capsys.readouterr().out
+
+
+def test_semantic_offer_is_structurally_disabled_in_frozen_build(monkeypatch, tmp_path):
+    from jarvis import index_cli as cli
+    from jarvis import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(cli, "index_repo", lambda *args, **kwargs: "frozen")
+    monkeypatch.setattr(
+        cli,
+        "_semantic_extra_missing",
+        lambda: (_ for _ in ()).throw(AssertionError("frozen build must not offer")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_at_interactive_tty",
+        lambda: (_ for _ in ()).throw(AssertionError("frozen build must not prompt")),
+    )
+    args = argparse.Namespace(path=str(tmp_path), slug="frozen", offer_semantic=True)
+    assert cli._cmd_index(args) == 0
+
+
+def test_frozen_semantic_skip_names_homebrew_distribution(monkeypatch, tmp_path, capsys):
+    from jarvis import index_cli as cli
+    from jarvis import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    assert cli._prepare_semantic_stage(tmp_path, "frozen", tmp_path, (), None) is None
+    assert "not included in the Homebrew binary distribution" in capsys.readouterr().err
+
+
+def test_frozen_semantic_install_hint_never_mentions_uv(monkeypatch):
+    from jarvis import runtime
+    from jarvis.embeddings import semantic_install_hint
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    frozen_hint = semantic_install_hint()
+    assert "Homebrew binary distribution" in frozen_hint
+    assert "uv" not in frozen_hint
+    monkeypatch.setattr(runtime, "is_frozen", lambda: False)
+    assert "uv" in semantic_install_hint()

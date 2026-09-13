@@ -9,6 +9,7 @@ Subcommands: index, list, status, reindex, forget, watch.
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 import contextlib
 import importlib.util
 import json
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from jarvis import config
 from jarvis import jobs
+from jarvis import runtime
 from jarvis.graph import (
     GraphStore,
     clear_graph_edges_for_repo,
@@ -782,6 +784,13 @@ def _prepare_semantic_stage(
     feed `build_syntax_index`'s shared-parse callback. Optional and
     non-fatal: a missing `semantic` extra returns None with a hint, any
     other failure warns and lets the baseline publish proceed."""
+    if runtime.is_frozen():
+        print(
+            "semantic indexing skipped — semantic search is not included "
+            "in the Homebrew binary distribution",
+            file=sys.stderr,
+        )
+        return None
     try:
         from jarvis import semantic
     except ImportError:
@@ -1587,6 +1596,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
     # (4) this repo must not have declined before.
     if (
         getattr(args, "offer_semantic", False)
+        and not runtime.is_frozen()
         and _semantic_extra_missing()
         and _at_interactive_tty()
     ):
@@ -2038,8 +2048,18 @@ def _warn_removed_env() -> None:
         )
 
 
+def _distribution_version() -> str:
+    try:
+        return distribution_version("jarvis-mcp")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis")
+    parser.add_argument(
+        "--version", action="version", version=f"jarvis {_distribution_version()}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     index_parser = subparsers.add_parser("index", help="index a repo")
