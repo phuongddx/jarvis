@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>jarvis · local-first code intelligence for coding agents</title>
-<meta name="description" content="Precomputed SCIP navigation, Zoekt lexical search, and semantic search, exposed to Claude Code or any MCP client. One local stdio process. No server, no auth, no network.">
+<meta name="description" content="Precomputed SCIP navigation and Zoekt lexical search, exposed to Claude Code or any MCP client. One local stdio process. No server, no auth, no network.">
 
 <style>
 /* ---------------------------------------------------------------
@@ -483,7 +483,7 @@ a:focus-visible, .btn:focus-visible {
           <h3>Publishing is atomic</h3>
           <p>
             A reindex writes a new versioned database, populates the package
-            graph, and runs <code class="inline">zoekt-index</code>. Only once all
+            graph, and runs <code class="inline">zoekt-git-index</code>. Only once all
             of that succeeds does <code class="inline">os.replace</code> flip a
             small pointer file. A query already reading the old file keeps
             working, and a failure anywhere leaves the previous index live.
@@ -533,21 +533,21 @@ a:focus-visible, .btn:focus-visible {
             Language is detected by extension plurality across
             <code class="inline">git ls-files</code>, not a filesystem walk,
             because a walk also counts gitignored scratch directories that can
-            outnumber a repo's own code. The semantic stage is the one stage
-            allowed to fail without blocking the publish.
+            outnumber a repo's own code. Optional source-build semantic work
+            is the one stage allowed to fail without blocking the publish.
           </p>
         </div>
         <div class="g-item">
-          <h3>Two query paths, and no router between them</h3>
+          <h3>Exact and lexical query paths</h3>
           <p>
-            The structural path returns exact ranges. The hybrid path fuses
-            vector and lexical hits with reciprocal rank fusion. Nothing
-            classifies your query or silently falls back: the agent picks the
-            tool, which means you can predict which one ran.
+            The structural path returns exact ranges. The lexical path searches
+            Zoekt directly. Nothing classifies your query or silently falls
+            back: the agent picks the tool, which means you can predict which
+            one ran.
           </p>
         </div>
         <div class="g-item">
-          <h3>Nine flat tools over stdio JSON-RPC</h3>
+          <h3>Ten flat tools over stdio JSON-RPC</h3>
           <p>
             Every tool reports failure the same way, as an
             <code class="inline">{"error": "..."}</code> payload rather than a
@@ -565,12 +565,13 @@ a:focus-visible, .btn:focus-visible {
   <section id="tools">
     <div class="wrap">
       <div class="sec-head">
-        <h2>Nine MCP tools</h2>
+        <h2>Ten MCP tools</h2>
         <p class="lede">
           Every navigation tool takes <code class="inline">repo</code>, the slug
           from <code class="inline">jarvis index</code>, plus a
           <code class="inline">symbol</code> or <code class="inline">path</code>.
-          Eight of the nine work today.
+          Nine are operational; semantic search reports that the Homebrew
+          distribution excludes it.
         </p>
       </div>
 
@@ -588,18 +589,19 @@ a:focus-visible, .btn:focus-visible {
             <li><span class="n mono">documentSymbols</span>
                 <span class="d">outline of one file</span></li>
             <li><span class="n mono">typeHierarchy</span>
-                <span class="flag">NOT WORKING</span></li>
+                <span class="d">supertypes and subtypes from bundled SCIP data</span></li>
           </ul>
         </div>
 
         <div class="tg">
           <h3>Search</h3>
-          <p>Lexical and natural language, fused when both are available.</p>
+          <p>Precise lexical search; the semantic tool is explicit about its
+            Homebrew exclusion.</p>
           <ul>
             <li><span class="n mono">searchCode</span>
                 <span class="d">Zoekt trigram search, regex capable</span></li>
             <li><span class="n mono">semanticSearch</span>
-                <span class="d">vector hits fused with Zoekt by rank</span></li>
+                <span class="flag">HOMEBREW EXCLUDED</span></li>
           </ul>
         </div>
 
@@ -614,10 +616,12 @@ a:focus-visible, .btn:focus-visible {
 
         <div class="tg">
           <h3>Freshness</h3>
-          <p>Never reports stale without evidence to compare against.</p>
+          <p>Index state and launches are explicit.</p>
           <ul>
             <li><span class="n mono">getIndexStatus</span>
                 <span class="d">published commit, and staleness against a working tree</span></li>
+            <li><span class="n mono">indexRepo</span>
+                <span class="d">launch a detached index run for a git repo</span></li>
           </ul>
         </div>
       </div>
@@ -700,21 +704,19 @@ a:focus-visible, .btn:focus-visible {
           before querying it.
         </div>
         <div>
-          <b><code class="inline">typeHierarchy</code> returns an error, not results.</b>
-          The upstream converter declares
-          <code class="inline">global_symbols.relationships</code> but never
-          populates it. An empty answer would wrongly assert "no supertypes", so
-          the tool says it cannot tell instead. Tracked as
-          <a href="https://github.com/scip-code/scip/issues/464">scip#464</a>,
-          with a fix open in
-          <a href="https://github.com/scip-code/scip/pull/465">scip#465</a>.
+          <b>Semantic search is excluded.</b>
+          The Homebrew package deliberately omits the embedding stack. The
+          <code class="inline">semanticSearch</code> tool remains registered and
+          reports that distribution-specific limitation rather than pretending
+          to return ranked vectors.
         </div>
         <div>
-          <b>It needs external binaries.</b>
-          One language indexer per repo, plus
-          <code class="inline">scip</code> and
-          <code class="inline">zoekt-index</code>. The setup script installs
-          them, and re-running it skips whatever is already present.
+          <b>Language indexers are optional.</b>
+          The package embeds <code class="inline">scip</code> and both Zoekt
+          binaries but does not install <code class="inline">setup.sh</code>.
+          From a jarvis source checkout, add only the indexer matching your
+          repo with its <code class="inline">setup.sh --only ...</code>
+          selector and the toolchain that indexer requires.
         </div>
       </div>
     </div>
@@ -735,35 +737,42 @@ a:focus-visible, .btn:focus-visible {
 
       <div class="step">
         <div class="step-head">
-          <h3>Install the indexer binaries</h3>
+          <h3>Install jarvis</h3>
           <span>once per machine</span>
         </div>
         <div class="term">
-<pre><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh</pre>
+<pre><span class="p">$</span> brew install jarvis-intelligence/jarvis/jarvis</pre>
         </div>
         <p>
-          Installs <code class="inline">scip</code>, the Zoekt binaries, and the
-          per-language indexers. Pass <code class="inline">--only &lt;name&gt;</code>
-          for a single dependency or <code class="inline">--force</code> to
-          reinstall.
+          Linux users install Homebrew/Linuxbrew first. The standalone package
+          supports macOS and Linux on arm64/x86_64, installs
+          <code class="inline">jarvis</code> and
+          <code class="inline">jarvis-server</code> together, and embeds Python
+          3.12, dashboard assets, tree-sitter, <code class="inline">watch</code>,
+          <code class="inline">scip</code>, and both Zoekt binaries. Homebrew
+          supplies <code class="inline">universal-ctags</code>; no Python, uv,
+          pip, or package index is needed.
         </p>
       </div>
 
       <div class="step">
         <div class="step-head">
-          <h3>Install jarvis</h3>
-          <span>once per machine</span>
+          <h3>Add a language indexer</h3>
+          <span>optional, once per machine</span>
         </div>
         <div class="term">
-<pre><span class="p">$</span> uv tool install jarvis-mcp</pre>
+<pre><span class="p">$</span> cd /path/to/jarvis-source
+<span class="p">$</span> sh setup.sh --only scip-python</pre>
         </div>
-        <div class="alt">
-          <p>Optional extras, if you want file watching or semantic search:</p>
-          <div class="term">
-<pre><span class="p">$</span> uv tool install <span class="k">"jarvis-mcp[watch]"</span>
-<span class="p">$</span> uv tool install <span class="k">"jarvis-mcp[semantic]"</span></pre>
-          </div>
-        </div>
+        <p>
+          The Homebrew package does not install this script. Selectors are
+          <code class="inline">scip-typescript</code>, <code class="inline">scip-python</code>,
+          <code class="inline">scip-java</code>, and
+          <code class="inline">scip-swift</code>. The first two need Node/npm;
+          Java needs a JDK (Kotlin 2.2.0 exactly); Swift needs Xcode on macOS
+          arm64. Use <code class="inline">bash-shim</code> for Maven Java repos
+          on macOS after installing a modern Bash.
+        </p>
       </div>
 
       <div class="step">
@@ -818,7 +827,7 @@ a:focus-visible, .btn:focus-visible {
     </div>
     <div class="foot-links">
       <a href="https://github.com/jarvis-intelligence/jarvis-index">GitHub</a>
-      <a href="https://pypi.org/project/jarvis-mcp/">PyPI</a>
+      <a href="https://github.com/jarvis-intelligence/homebrew-jarvis">Homebrew tap</a>
       <a href="system-architecture.md">Architecture</a>
       <a href="project-overview-pdr.md">Overview</a>
       <a href="https://github.com/jarvis-intelligence/jarvis-index/blob/main/LICENSE">License</a>

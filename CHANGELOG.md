@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Replaced the uv/PyPI installation path with a Homebrew standalone
+  distribution for macOS arm64/x86_64 and Linux arm64/x86_64.
+- Bundled Python 3.12, `watch`, dashboard assets, tree-sitter libraries,
+  pinned SCIP, Zoekt indexing, and Zoekt search binaries.
+- Excluded optional semantic dependencies from the standalone distribution.
+- Removed PyPI, MCP Registry, and legacy bootstrap publication workflows.
+
 ## [0.10.0] - 2026-09-12
 
 Minor rather than patch: jarvis gains a localhost operator dashboard — the

@@ -13,7 +13,7 @@ as MCP tools over stdio — no HTTP server, no auth, no network.
 ```bash
 uv sync                              # install deps
 uv sync --extra watch                # + watchdog, needed for `jarvis watch`
-uv sync --extra semantic             # + lancedb/sentence-transformers/tree-sitter, needed for semanticSearch
+uv sync --extra semantic             # + lancedb/sentence-transformers, needed for source-build semanticSearch
 
 uv run pytest                        # all tests
 uv run pytest -m "not integration"   # unit only — no external binaries required
@@ -31,9 +31,12 @@ uv run jarvis-server              # MCP stdio entry point
 claude mcp add jarvis --scope user -- uv --directory /path/to/jarvis run jarvis-server
 ```
 
-Required on `PATH` for anything beyond unit tests: one language indexer per repo
-(`scip-typescript` / `scip-python` / `scip-java` / `scip-swift`), `scip` (for `scip expt-convert`),
-and `zoekt-git-index` / `zoekt-webserver`. Integration tests are gated on these and skip cleanly if absent.
+Unit tests need no external binaries. Integration tests expect the applicable language indexer,
+`scip`, `zoekt-git-index`, and `zoekt-webserver` on `PATH`; they skip cleanly when absent.
+From this source checkout, `setup.sh` installs only optional language indexers
+(`--only scip-swift`, `scip-typescript`, `scip-python`, `scip-java`, or
+`bash-shim`) — not the core binaries. The Homebrew package does not install
+`setup.sh`.
 
 ## Architecture
 
@@ -62,7 +65,9 @@ Three engines sit behind the MCP server, each backed by its own storage:
   `symbol_search.py`, reusing `symbols.py`'s name-map machinery) via reciprocal rank fusion. Gated
   behind the optional `semantic` extra; the indexing stage is non-fatal in `jarvis index` (a failure
   there never blocks the SCIP/Zoekt publish). A LanceDB table only ever holds vectors from one
-  model+revision — the model-identity rule.
+  model+revision — the model-identity rule. This path is source-build only: the standalone
+  distribution excludes semantic dependencies and `semanticSearch` returns a Homebrew-specific
+  unavailability error.
 
 **Index pipeline** (`index_cli.py`, `index_repo()`): detect language by extension plurality
 **across git-tracked files** (ties broken by fixed priority `.ts→.tsx→.py→.java→.kt→.swift`; one language per repo, no
@@ -98,23 +103,17 @@ index. `getIndexStatus`'s `searchCoverage` compares the `tracked_files` recorded
 against zoekt's live `Documents` precisely so that kind of loss is reported instead of silently
 serving partial results.
 
-**Two repos: private development, public distribution.** This repo is private, and
-GitHub serves raw files, release assets, and marketplace metadata only to viewers of
-the owning repo — so every install path advertised from here 404s for a real user.
-`jarvis-intelligence/jarvis-index` is a public repo holding the public distribution surface: a synced
-copy of `setup.sh`, the zoekt/scip release assets, the issue tracker — and, since
-2026-08-07, the **source of truth** for the Claude Code and Codex plugins and the
-marketplace definition (`.claude-plugin/` + `plugin/` + `.codex-plugin/`, edited there
-directly, versioned independently of the PyPI package; this repo no longer contains them).
-`sync-public-distribution.yml` overwrites only `setup.sh` on every release, and
-`build-zoekt.yml`/`build-scip.yml` publish the binaries there. Nothing else is mirrored: `src/` is
-already on PyPI, and history, issues, `docs/`, `plans/`, and CI definitions stay
-private. Privacy here protects the development process and, since the compiled-wheel
-pipeline landed, the source: releases ship Cython-compiled `.so` modules
-(only `__init__.py` and the generated `scip_pb2.py` remain plain Python),
-with no sdist. Wheels ≤ 0.5.1 predate this and stay readable on PyPI
-forever. Local dev is unaffected — compilation happens only under
-`JARVIS_COMPILE=1` in `publish-pypi.yml`.
+**Distribution repos.** This repository is private development/source. End users install
+`brew install jarvis-intelligence/jarvis/jarvis`; the generated formula lives in public
+`jarvis-intelligence/homebrew-jarvis`. `publish-native.yml` builds four self-contained
+archives (embedding Python 3.12, `watch`, dashboard assets, tree-sitter, `scip`,
+`zoekt-git-index`, and `zoekt-webserver`), stages them to the tap's release, validates
+the formula on four runner environments, and commits it. Homebrew supplies
+`universal-ctags`; semantic dependencies are deliberately excluded. `build-zoekt.yml`
+and `build-scip.yml` publish their pinned binary assets to public
+`jarvis-intelligence/jarvis-index`; that repo also remains the independent source of
+truth for Claude Code/Codex plugin content. Development uses uv; the release build's
+Cython wheel is PyInstaller input and is not published as an installation artifact.
 
 **Language detection reads git, not the filesystem:** `detect_language()` counts extensions across
 `git ls-files`, not a `rglob` walk. A walk also counts gitignored scratch directories — vendored
@@ -140,13 +139,13 @@ nav tool takes `repo` (the slug from `jarvis index`) plus a tool-specific `symbo
 **typeHierarchy needs the fork-built scip.** Upstream `scip expt-convert` (through v0.9.0) declares
 `global_symbols.relationships` but never populates it — reported as
 [scip#464](https://github.com/scip-code/scip/issues/464), fix PR
-[scip#465](https://github.com/scip-code/scip/pull/465) still open. setup.sh therefore installs a
+[scip#465](https://github.com/scip-code/scip/pull/465) still open. Native packaging therefore fetches a
 build of the public fork `phuongddx/scip` (v0.9.0 + the fix), cross-compiled by `build-scip.yml`
 from the commit pinned in `SCIP_COMMIT` and published to jarvis-index releases — the same pattern
 as zoekt. Indexes created with an unpatched upstream binary still make `typeHierarchy` return an
 explicit `{"error": ...}` — deliberately *not* empty arrays, which would wrongly assert "no
 supertypes"; `relationship_data_present()` self-heals on reindex. Exit ramp: when upstream merges
-#465 and releases, repoint setup.sh at `scip-code/scip` and delete `build-scip.yml` + `SCIP_COMMIT`.
+#465 and releases, repoint native packaging at `scip-code/scip` releases and delete `build-scip.yml` + `SCIP_COMMIT`.
 
 **Java/Kotlin reach is narrower than "supported" suggests.** `scip-java` indexes plain JVM
 Gradle/Maven repos, and jarvis forces `-Dorg.gradle.parallel=false` for them because scip-java's
@@ -212,12 +211,8 @@ against fixtures in `tests/fixtures/`.
 ## Cutting a release
 
 Use the `.claude/skills/jarvis-release` skill (project-scoped, maintainer-only — distinct from
-the end-user plugin skills, which live in jarvis-index). It captures the full pipeline
-verified end-to-end while cutting v0.3.1: bump the version consistently across `pyproject.toml`,
-`server.json` (two fields), and `uv.lock`; add a `CHANGELOG.md`
-entry; open and merge a `chore/release-X.Y.Z` PR; tag and publish a GitHub Release; confirm
-`publish-pypi.yml`/`publish-mcp-registry.yml` both succeed. `scripts/check_versions.py` (run in CI
-by `test.yml`) enforces the same 3-file consistency. The Claude Code and Codex plugins version
-separately in jarvis-index — bump `plugin/.claude-plugin/plugin.json` and
-`.codex-plugin/plugin.json` there when plugin content changes, and keep the
-`.mcp.json` `--from` floor a valid `>=` minimum against PyPI by hand.
+the end-user plugin skills, which live in jarvis-index). The runbook bumps the sole version
+source in `pyproject.toml`, refreshes `uv.lock`, runs tests and the version checker, merges
+a release PR, signs the tag, publishes its GitHub Release, then requires all four native builds, all
+four Homebrew validations, the public tap formula commit, and a local Homebrew install check
+to pass. The Claude Code and Codex plugins version separately in jarvis-index.
