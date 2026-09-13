@@ -135,3 +135,40 @@ def test_mcp_close_closes_stdin_before_terminating_process_group():
         "stream-close",
         "stream-close",
     ]
+
+
+def test_native_environment_keeps_discovered_scip_python_directory(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(
+        smoke.shutil,
+        "which",
+        lambda name: "/opt/homebrew/bin/scip-python"
+        if name == "scip-python"
+        else None,
+    )
+    env = smoke.native_environment(tmp_path, tmp_path / "data")
+    assert env["PATH"].split(":")[:2] == [
+        str(tmp_path / "bin"),
+        "/opt/homebrew/bin",
+    ]
+
+
+def test_native_environment_pins_a_free_zoekt_port(monkeypatch, tmp_path):
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def bind(self, address):
+            return None
+
+        def getsockname(self):
+            return ("127.0.0.1", 49152)
+
+    monkeypatch.setattr(smoke.socket, "socket", lambda: Socket())
+    env = smoke.native_environment(tmp_path, tmp_path / "data")
+    assert env["JARVIS_ZOEKT_PORT"] == "49152"

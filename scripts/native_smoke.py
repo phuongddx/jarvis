@@ -6,7 +6,9 @@ import argparse
 import json
 import os
 import queue
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -232,8 +234,20 @@ def native_environment(root: Path, data_dir: Path) -> dict[str, str]:
     paths = [str(root / "bin")]
     if env.get("NATIVE_SMOKE_EXTRA_PATH"):
         paths.append(env["NATIVE_SMOKE_EXTRA_PATH"])
+    # Language indexers are deliberately not bundled; keep the directory of
+    # the parent environment's scip-python visible after sanitizing PATH.
+    indexer = shutil.which("scip-python")
+    if indexer:
+        directory = str(Path(indexer).parent)
+        if directory not in paths:
+            paths.append(directory)
     paths.extend(["/usr/local/bin", "/usr/bin", "/bin"])
     env["PATH"] = os.pathsep.join(paths)
+    # The smoke must not share the default Zoekt port with an unrelated
+    # jarvis/zoekt-webserver already running on this machine.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        env["JARVIS_ZOEKT_PORT"] = str(probe.getsockname()[1])
     return env
 
 
