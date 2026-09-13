@@ -806,6 +806,8 @@ def test_check_scip_version_rejects_v070(monkeypatch):
     message = str(exc.value)
     assert "0.7.0" in message
     assert "0.9.0" in message, "must state the required floor"
+    assert "brew reinstall jarvis" in message
+    assert "jarvis reindex" in message
 
 
 def test_check_scip_version_accepts_v090(monkeypatch):
@@ -842,7 +844,7 @@ def test_check_scip_swift_version_rejects_v021(monkeypatch):
     message = str(exc.value)
     assert "0.2.1" in message, "must name the installed version"
     assert "0.3.0" in message, "must state the required floor"
-    assert "setup.sh" in message, "must name the recovery path"
+    assert "sh setup.sh --only scip-swift" in message, "must name the exact recovery command"
 
 
 def test_check_scip_swift_version_accepts_v030_real_format(monkeypatch):
@@ -863,16 +865,27 @@ def test_check_scip_swift_version_tolerates_unparseable(monkeypatch):
     cli.check_scip_swift_version()  # must not raise
 
 
+def test_scip_version_output_missing_binary_names_homebrew_remedy(monkeypatch):
+    """A missing bundled binary points to the Homebrew package."""
+    import jarvis.index_cli as cli
+
+    def _no_binary(*_args, **_kwargs):
+        raise FileNotFoundError("scip")
+
+    monkeypatch.setattr(cli.subprocess, "run", _no_binary)
+    with pytest.raises(cli.IndexingError, match="brew reinstall jarvis"):
+        cli._scip_version_output()
+
+
 def test_scip_swift_version_output_missing_binary_names_setup_sh(monkeypatch):
-    """A missing binary surfaces as IndexingError naming setup.sh, mirroring
-    _scip_version_output's FileNotFoundError wrap."""
+    """A missing optional binary names its retained setup.sh selector."""
     import jarvis.index_cli as cli
 
     def _no_binary(*_args, **_kwargs):
         raise FileNotFoundError("scip-swift")
 
     monkeypatch.setattr(cli.subprocess, "run", _no_binary)
-    with pytest.raises(cli.IndexingError, match="setup.sh"):
+    with pytest.raises(cli.IndexingError, match=r"setup\.sh --only scip-swift"):
         cli._scip_swift_version_output()
 
 
@@ -936,14 +949,33 @@ def test_run_returns_the_completed_process(tmp_path: Path):
     assert result.stdout.strip() == "hello"
 
 
-def test_run_turns_a_missing_binary_into_a_setup_remedy(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("binary", "remedy"),
+    [
+        ("scip", "brew reinstall jarvis, then rerun indexing"),
+        ("zoekt-git-index", "brew reinstall jarvis, then rerun indexing"),
+        ("zoekt-webserver", "brew reinstall jarvis, then rerun indexing"),
+        ("scip-python", "sh setup.sh --only scip-python"),
+        ("scip-typescript", "sh setup.sh --only scip-typescript"),
+        ("scip-java", "sh setup.sh --only scip-java"),
+        ("scip-swift", "sh setup.sh --only scip-swift"),
+    ],
+)
+def test_run_names_a_binary_specific_recovery(
+    tmp_path: Path, monkeypatch, binary: str, remedy: str
+):
     """A missing binary raised a bare FileNotFoundError, which says nothing
-    about how to fix it. Matters most for the zoekt-index -> zoekt-git-index
-    rename: existing installs must re-run setup.sh to get the new binary."""
-    from jarvis.index_cli import IndexingError, _run
+    about how to fix it. Bundled binaries belong to Homebrew; retained
+    language indexers still belong to setup.sh."""
+    import jarvis.index_cli as index_cli
 
-    with pytest.raises(IndexingError, match="setup.sh"):
-        _run(["definitely-not-a-real-binary"], cwd=tmp_path, step="fake step")
+    def _missing(*_args, **_kwargs):
+        raise FileNotFoundError(binary)
+
+    monkeypatch.setattr(index_cli.subprocess, "run", _missing)
+    with pytest.raises(index_cli.MissingBinaryError, match=remedy) as excinfo:
+        index_cli._run([binary], cwd=tmp_path, step=f"{binary} fake")
+    assert binary in str(excinfo.value)
 
 
 @pytest.mark.integration

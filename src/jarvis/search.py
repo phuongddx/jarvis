@@ -287,6 +287,11 @@ class ZoektLifecycle:
                 stdout=subprocess.DEVNULL,
                 stderr=log_file,
             )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"{' '.join(self._argv_prefix)} not found on PATH — "
+                "brew reinstall jarvis"
+            ) from exc
         finally:
             log_file.close()  # the child keeps its own duplicated fd
 

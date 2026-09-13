@@ -251,6 +251,7 @@ def test_type_hierarchy_reports_unavailable_before_resolving(tmp_path: Path):
     with pytest.raises(CapabilityUnavailableError) as excinfo:
         service.type_hierarchy("norel", "NoSuchSymbol")
     assert excinfo.value.capability == "typeHierarchy"
+    assert excinfo.value.recovery == "brew reinstall jarvis, then jarvis reindex norel"
 
 
 def test_document_symbols_populate_display_name_and_kind(query_service: QueryService):

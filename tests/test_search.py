@@ -313,6 +313,20 @@ def test_failed_spawn_includes_stderr_tail(tmp_path: Path):
     assert "exited immediately" in str(excinfo.value)
 
 
+def test_ensure_running_missing_webserver_keeps_type_and_names_reinstall(
+    tmp_path: Path, monkeypatch
+):
+    """zoekt-webserver is bundled with jarvis's Homebrew package."""
+    def _missing(*_args, **_kwargs):
+        raise FileNotFoundError("zoekt-webserver")
+
+    monkeypatch.setattr("jarvis.search.subprocess.Popen", _missing)
+    lifecycle = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="brew reinstall jarvis"):
+        lifecycle.ensure_running()
+
+
 def test_spawn_race_adopts_sibling_winner(tmp_path: Path, monkeypatch, fake_zoekt_binary: Path):
     winner = ZoektLifecycle(index_dir=tmp_path / "i", data_dir=tmp_path / "d",
                             port=16072, binary=[sys.executable, str(fake_zoekt_binary)])
