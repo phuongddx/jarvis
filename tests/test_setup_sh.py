@@ -6,9 +6,7 @@ without performing a real install.
 """
 
 import hashlib
-import re
 import shutil
-import stat
 import subprocess
 import tarfile
 from pathlib import Path
@@ -49,6 +47,13 @@ def test_dash_is_available_for_honest_bashism_detection():
         "run under macOS /bin/sh, which accepts bashisms and cannot catch "
         "the Linux-only breakage this suite exists to prevent."
     )
+
+
+def test_setup_helper_is_documented_for_source_checkout_use():
+    content = SETUP_SH.read_text()
+    assert "raw.githubusercontent.com" not in content
+    assert "setup.sh | sh" not in content
+    assert "jarvis source checkout" in content
 
 
 def test_detect_os_maps_darwin():
@@ -230,47 +235,6 @@ def test_verify_sha256_rejects_wrong_digest(tmp_path):
     assert "checksum" in (result.stdout + result.stderr).lower()
 
 
-def test_install_tarball_binary_extracts_and_marks_executable(tmp_path):
-    """End-to-end on a locally built tarball served over file:// — no network."""
-    payload = tmp_path / "mytool"
-    payload.write_text("#!/bin/sh\necho hello-from-mytool\n")
-    tar_path = tmp_path / "mytool.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tf:
-        tf.add(payload, arcname="mytool")
-    sha_path = tmp_path / "mytool.tar.gz.sha256"
-    digest = hashlib.sha256(tar_path.read_bytes()).hexdigest()
-    # Upstream .sha256 files use the "<digest>  <filename>" format.
-    sha_path.write_text(f"{digest}  mytool.tar.gz\n")
-
-    bin_path = tmp_path / "bin"
-    result = run_func(
-        f'install_tarball_binary file://{tar_path} file://{sha_path} mytool mytool',
-        env={"JARVIS_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    assert result.returncode == 0, result.stderr
-    installed = bin_path / "mytool"
-    assert installed.is_file()
-    assert installed.stat().st_mode & 0o111, "must be executable"
-
-
-def test_install_tarball_binary_refuses_on_checksum_mismatch(tmp_path):
-    payload = tmp_path / "mytool"
-    payload.write_text("#!/bin/sh\ntrue\n")
-    tar_path = tmp_path / "mytool.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tf:
-        tf.add(payload, arcname="mytool")
-    sha_path = tmp_path / "mytool.tar.gz.sha256"
-    sha_path.write_text(f"{'0' * 64}  mytool.tar.gz\n")
-
-    bin_path = tmp_path / "bin"
-    result = run_func(
-        f'install_tarball_binary file://{tar_path} file://{sha_path} mytool mytool',
-        env={"JARVIS_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    assert result.returncode != 0
-    assert not (bin_path / "mytool").exists(), "must not install an unverified binary"
-
-
 def test_install_raw_binary_installs_and_marks_executable(tmp_path):
     """scip-java ships a bare launcher, not a tarball — no extraction step."""
     payload = tmp_path / "launcher"
@@ -306,77 +270,7 @@ def test_install_raw_binary_refuses_on_checksum_mismatch(tmp_path):
     assert not (bin_path / "mytool").exists(), "must not install an unverified binary"
 
 
-# ------------------------------------------------------------ scip installer ----
-
-
-@pytest.mark.parametrize(
-    "os_name,arch,expected",
-    [
-        ("darwin", "arm64", "scip-darwin-arm64.tar.gz"),
-        ("darwin", "amd64", "scip-darwin-amd64.tar.gz"),
-        ("linux", "amd64", "scip-linux-amd64.tar.gz"),
-        ("linux", "arm64", "scip-linux-arm64.tar.gz"),
-    ],
-)
-def test_scip_asset_name_covers_all_supported_platforms(os_name, arch, expected):
-    result = run_func(f'scip_asset_name {os_name} {arch}')
-    assert result.stdout.strip() == expected
-
-
-def test_scip_pin_matches_committed_file():
-    """The in-script pin must not drift from the SCIP_COMMIT file CI builds
-    from: a drifted pin downloads a release build-scip.yml never published,
-    which 404s for every user.
-
-    The non-empty and format assertions guard against the vacuous pass:
-    two empty (or two 'latest') values would compare equal while producing
-    a download URL that resolves for nobody."""
-    on_disk = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
-    in_script = run_func('echo "$SCIP_COMMIT_PIN"').stdout.strip()
-    assert re.fullmatch(r"[0-9a-f]{7,40}", on_disk), f"SCIP_COMMIT is not a commit hash: {on_disk!r}"
-    assert in_script == on_disk
-
-
-def test_install_scip_reinstalls_over_unpatched_upstream_binary(tmp_path):
-    """The upgrade path for the installed base: existing users hold upstream
-    v0.9.0, whose --version carries no fork commit. A bare presence check
-    would strand them on broken typeHierarchy forever, so a version mismatch
-    must fall through to the download path (asserted here via its failure
-    against an unreachable URL, not 'already installed, skipping')."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    scip = fake_bin / "scip"
-    scip.write_text('#!/bin/sh\necho "scip version v0.9.0"\n')
-    scip.chmod(0o755)
-    result = run_func(
-        # Shadow download_to so the fall-through is observable without
-        # network access: reaching the download step proves the version
-        # gate declined to skip.
-        'download_to() { return 1; }\ninstall_scip darwin arm64',
-        env={"JARVIS_BIN_DIR": str(fake_bin)},
-    )
-    assert "already installed" not in result.stdout
-    assert "installing fork build" in result.stdout
-
-
-def test_scip_release_repo_is_set():
-    """The scip binaries come from a dedicated public repo, not this one."""
-    assert run_func('echo "$SCIP_RELEASE_REPO"').stdout.strip() == "jarvis-intelligence/jarvis-index"
-
-
-def test_scip_release_repo_is_not_the_private_repo():
-    """Same invariant as the zoekt variant above: GitHub serves release
-    assets only to viewers of the owning repo, so pointing scip downloads at
-    the private development repo 404s for every real user.
-
-    The non-empty assertion comes first deliberately: without it, an unset
-    SCIP_RELEASE_REPO makes `"" != "jarvis-intelligence/jarvis"` true and the test
-    passes vacuously, guarding nothing."""
-    release_repo = run_func('echo "$SCIP_RELEASE_REPO"').stdout.strip()
-    private_repo = run_func('echo "$JARVIS_REPO"').stdout.strip()
-    assert release_repo, "SCIP_RELEASE_REPO is unset"
-    assert private_repo, "JARVIS_REPO is unset"
-    assert release_repo != private_repo
+# ------------------------------------------------- shared installer helpers ----
 
 
 def test_already_installed_finds_binary_in_bin_dir_not_on_path(tmp_path):
@@ -424,99 +318,7 @@ def test_already_installed_reports_missing_when_truly_absent(tmp_path):
     assert "MISSING" in result.stdout
 
 
-def test_install_scip_skips_when_present_only_in_bin_dir(tmp_path):
-    """Regression: CI caught setup.sh re-downloading on every re-run.
-
-    The stub reports the pinned fork commit because the skip is
-    version-gated: after a real install the binary genuinely stamps the pin,
-    so re-runs skip, while a silent or upstream binary must NOT skip (see
-    test_install_scip_reinstalls_over_unpatched_upstream_binary)."""
-    pin = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
-    bin_path = tmp_path / "bin"
-    bin_path.mkdir()
-    stub = bin_path / "scip"
-    stub.write_text(f'#!/bin/sh\necho "SHA: {pin}0000000000000000000000000000"\n')
-    stub.chmod(0o755)
-    result = run_func(
-        'install_scip linux amd64',
-        env={"JARVIS_BIN_DIR": str(bin_path), "PATH": "/usr/bin:/bin"},
-    )
-    assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "already" in combined or "skip" in combined
-    assert "installing" not in combined, "must not re-download"
-
-
-def test_install_scip_skips_when_already_present(tmp_path):
-    """A pin-stamped scip on PATH must not be re-downloaded."""
-    pin = (Path(__file__).parent.parent / "SCIP_COMMIT").read_text().strip()
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    stub = fake_bin / "scip"
-    stub.write_text(f'#!/bin/sh\necho "SHA: {pin}0000000000000000000000000000"\n')
-    stub.chmod(0o755)
-    result = run_func(
-        'install_scip darwin arm64',
-        env={
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
-        },
-    )
-    assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "already" in combined or "skip" in combined
-
-
-# --------------------------------------------- scip-java detect-only / confirm ----
-
-
-def test_confirm_returns_nonzero_when_no_tty_available(tmp_path):
-    """Non-interactive runs (piped, CI) must default to "no", never hang."""
-    result = subprocess.run(
-        [POSIX_SH, "-c", f'. {SETUP_SH}\nconfirm "proceed?" && echo YES || echo NO'],
-        capture_output=True,
-        text=True,
-        env={"JARVIS_SETUP_SOURCED": "1", "PATH": "/usr/bin:/bin"},
-        stdin=subprocess.DEVNULL,
-    )
-    assert "NO" in result.stdout
-
-
-def test_confirm_emits_no_raw_shell_errors_without_a_tty(tmp_path):
-    """`[ -r /dev/tty ]` alone is not enough.
-
-    The device node can exist and test as readable while no controlling
-    terminal is attached (CI, a piped subprocess). Writing to it then fails
-    with a raw "Device not configured" / "No such device" error, which looks
-    like a broken installer. confirm() must probe the tty for real and stay
-    quiet.
-    """
-    result = subprocess.run(
-        [POSIX_SH, "-c", f'. {SETUP_SH}\nconfirm "proceed?" && echo YES || echo NO'],
-        capture_output=True,
-        text=True,
-        env={"JARVIS_SETUP_SOURCED": "1", "PATH": "/usr/bin:/bin"},
-        stdin=subprocess.DEVNULL,
-    )
-    assert "NO" in result.stdout
-    combined = result.stdout + result.stderr
-    for noise in ("/dev/tty", "Device not configured", "No such device"):
-        assert noise not in combined, f"leaked raw shell error: {combined!r}"
-
-
-def test_confirm_does_not_read_from_stdin(tmp_path):
-    """Feeding "y" on stdin must NOT be accepted — it must come from /dev/tty.
-
-    This is the curl|sh correctness guard: stdin there is the script itself.
-    """
-    result = subprocess.run(
-        [POSIX_SH, "-c", f'. {SETUP_SH}\nconfirm "proceed?" && echo YES || echo NO'],
-        capture_output=True,
-        text=True,
-        env={"JARVIS_SETUP_SOURCED": "1", "PATH": "/usr/bin:/bin"},
-        input="y\n",
-    )
-    assert "NO" in result.stdout, "confirm() must ignore stdin and use /dev/tty"
+# ------------------------------------------------ scip-java installer ----
 
 
 def test_install_scip_java_warns_and_returns_zero_without_java(tmp_path):
@@ -607,280 +409,6 @@ def test_scip_typescript_wrapper_uses_sourcegraph_package(tmp_path):
     )
     assert result.returncode == 0
     assert "@sourcegraph/scip-typescript" in log.read_text()
-
-
-# ------------------------------------------------------- jarvis-mcp installer ----
-
-
-def test_install_jarvis_mcp_warns_and_continues_without_uv():
-    """Missing uv is a soft skip with instructions, not a hard failure."""
-    result = run_func("install_jarvis_mcp")
-    assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "uv" in combined
-
-
-def test_install_jarvis_mcp_skips_when_already_present(tmp_path):
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    stub = fake_bin / "jarvis-server"
-    stub.write_text("#!/bin/sh\ntrue\n")
-    stub.chmod(0o755)
-    result = run_func(
-        "install_jarvis_mcp",
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
-    )
-    assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "already" in combined or "skip" in combined
-
-
-def test_install_jarvis_mcp_invokes_uv_tool_install(tmp_path):
-    """Stub uv and assert the exact package name passed to it."""
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    log = tmp_path / "uv-args.txt"
-    uv_stub = fake_bin / "uv"
-    uv_stub.write_text(f'#!/bin/sh\necho "$@" > {log}\n')
-    uv_stub.chmod(0o755)
-    result = run_func(
-        "install_jarvis_mcp",
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
-    )
-    assert result.returncode == 0, result.stderr
-    args = log.read_text()
-    assert "tool" in args
-    assert "install" in args
-    assert "jarvis-mcp" in args
-    assert "--force" not in args
-
-
-def test_install_jarvis_mcp_forces_reinstall_when_forced(tmp_path):
-    """FORCE=1 both bypasses the already-installed skip and passes --force to uv.
-
-    FORCE is set as a shell variable in the snippet, not via the subprocess
-    env: sourcing setup.sh resets FORCE=0 at top level (parse_args is what
-    normally sets it, from main()'s --force flag), so an env-supplied FORCE
-    would be clobbered before install_jarvis_mcp ever sees it.
-    """
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    stub = fake_bin / "jarvis-server"
-    stub.write_text("#!/bin/sh\ntrue\n")
-    stub.chmod(0o755)
-    log = tmp_path / "uv-args.txt"
-    uv_stub = fake_bin / "uv"
-    uv_stub.write_text(f'#!/bin/sh\necho "$@" > {log}\n')
-    uv_stub.chmod(0o755)
-    result = run_func(
-        "FORCE=1\ninstall_jarvis_mcp",
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
-    )
-    assert result.returncode == 0, result.stderr
-    assert "--force" in log.read_text()
-
-
-# ----------------------------------------------------------- zoekt installer ----
-
-
-@pytest.mark.parametrize(
-    "os_name,arch,expected",
-    [
-        ("darwin", "arm64", "zoekt-darwin-arm64.tar.gz"),
-        ("linux", "amd64", "zoekt-linux-amd64.tar.gz"),
-    ],
-)
-def test_zoekt_asset_name(os_name, arch, expected):
-    result = run_func(f'zoekt_asset_name {os_name} {arch}')
-    assert result.stdout.strip() == expected
-
-
-def test_zoekt_pin_matches_committed_file():
-    """The in-script pin must not drift from the ZOEKT_COMMIT file CI reads."""
-    on_disk = (Path(__file__).parent.parent / "ZOEKT_COMMIT").read_text().strip()
-    in_script = run_func('echo "$ZOEKT_COMMIT_PIN"').stdout.strip()
-    assert in_script == on_disk
-
-
-def test_install_zoekt_skips_when_both_binaries_present(tmp_path):
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    for name in ("zoekt-git-index", "zoekt-webserver"):
-        stub = fake_bin / name
-        stub.write_text("#!/bin/sh\ntrue\n")
-        stub.chmod(0o755)
-    result = run_func(
-        'install_zoekt darwin arm64',
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "JARVIS_BIN_DIR": str(tmp_path / "bin")},
-    )
-    assert result.returncode == 0
-    combined = (result.stdout + result.stderr).lower()
-    assert "already" in combined or "skip" in combined
-
-
-def test_install_zoekt_extracts_both_binaries(tmp_path):
-    """Verify both members land, using a local tarball over file://."""
-    stage = tmp_path / "stage"
-    stage.mkdir()
-    for name in ("zoekt-git-index", "zoekt-webserver"):
-        p = stage / name
-        p.write_text("#!/bin/sh\ntrue\n")
-    tar_path = tmp_path / "zoekt-darwin-arm64.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tf:
-        for name in ("zoekt-git-index", "zoekt-webserver"):
-            tf.add(stage / name, arcname=name)
-    sha_path = tmp_path / "zoekt-darwin-arm64.tar.gz.sha256"
-    digest = hashlib.sha256(tar_path.read_bytes()).hexdigest()
-    sha_path.write_text(f"{digest}  zoekt-darwin-arm64.tar.gz\n")
-
-    bin_path = tmp_path / "bin"
-    result = run_func(
-        f'ZOEKT_BASE_URL="file://{tmp_path}" install_zoekt darwin arm64',
-        env={
-            "JARVIS_BIN_DIR": str(bin_path),
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "FORCE": "1",
-        },
-    )
-    assert result.returncode == 0, result.stderr
-    assert (bin_path / "zoekt-git-index").is_file()
-    assert (bin_path / "zoekt-webserver").is_file()
-    assert (bin_path / "zoekt-git-index").stat().st_mode & 0o111
-
-
-# ------------------------------------------------------ ctags installer ----
-
-
-def test_install_ctags_skips_when_already_installed():
-    result = run_func('already_installed() { return 0; }\ninstall_ctags')
-    assert result.returncode == 0
-    assert "already installed" in result.stdout
-
-
-def test_install_ctags_uses_brew_when_available(tmp_path):
-    # JARVIS_BIN_DIR must be set: a successful install chains
-    # link_universal_ctags -> ensure_bin_dir -> bin_dir(), and this host's
-    # real /usr/bin/ctags (BSD ctags, ships with Xcode CLT) is on PATH, so
-    # the symlink step actually runs here instead of warning.
-    result = run_func(
-        'already_installed() { return 1; }\n'
-        'have_cmd() { [ "$1" = brew ]; }\n'
-        'brew() { echo "BREW $*"; }\n'
-        'install_ctags',
-        env={"JARVIS_BIN_DIR": str(tmp_path / "install")},
-    )
-    assert result.returncode == 0
-    assert "BREW install universal-ctags" in result.stdout
-
-
-def test_install_ctags_apt_get_when_root(tmp_path):
-    # dash rejects `apt-get() { ... }` outright ("Bad function name": hyphens
-    # are not valid in a POSIX function name), so the fake apt-get must be a
-    # real executable on PATH rather than a shell function, unlike the other
-    # fakes in this test. JARVIS_BIN_DIR must be set for the same reason as
-    # the brew test above.
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    apt_get_stub = fake_bin / "apt-get"
-    apt_get_stub.write_text('#!/bin/sh\necho "APT $*"\n')
-    apt_get_stub.chmod(0o755)
-    result = run_func(
-        'already_installed() { return 1; }\n'
-        'have_cmd() { [ "$1" = apt-get ]; }\n'
-        'id() { echo 0; }\n'
-        'install_ctags',
-        env={"JARVIS_BIN_DIR": str(tmp_path / "install"), "PATH": f"{fake_bin}:/usr/bin:/bin"},
-    )
-    assert result.returncode == 0
-    assert "APT install -y -qq universal-ctags" in result.stdout
-
-
-def test_install_ctags_warns_when_no_installer():
-    result = run_func(
-        'already_installed() { return 1; }\n'
-        'have_cmd() { return 1; }\n'
-        'install_ctags'
-    )
-    # Warn, not fail: ctags absence degrades zoekt sym: only.
-    assert result.returncode == 0
-    assert "sym:" in (result.stdout + result.stderr)
-
-
-def test_link_universal_ctags_symlinks_the_real_ctags_binary(tmp_path):
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    real_ctags = fake_bin / "ctags"
-    real_ctags.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
-    real_ctags.chmod(real_ctags.stat().st_mode | stat.S_IEXEC)
-    install_dir = tmp_path / "install"
-    result = run_func(
-        "link_universal_ctags",
-        env={"JARVIS_BIN_DIR": str(install_dir), "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    assert result.returncode == 0
-    link = install_dir / "universal-ctags"
-    assert link.is_symlink()
-    assert link.resolve() == real_ctags.resolve()
-
-
-def test_link_universal_ctags_warns_when_ctags_binary_missing(tmp_path):
-    # This host's real /usr/bin/ctags (BSD ctags, ships with Xcode CLT)
-    # would otherwise satisfy `command -v ctags`, so PATH must be pared
-    # down to only the externals link_universal_ctags actually needs
-    # (mkdir, ln) -- none of which is ctags.
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    for tool in ("mkdir", "ln"):
-        (fake_bin / tool).symlink_to(shutil.which(tool))
-    result = run_func(
-        "link_universal_ctags",
-        env={"JARVIS_BIN_DIR": str(tmp_path / "install"), "PATH": str(fake_bin)},
-    )
-    assert result.returncode == 0
-    assert "sym:" in (result.stdout + result.stderr)
-
-
-def test_install_ctags_brew_links_ctags_after_install(tmp_path):
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    real_ctags = fake_bin / "ctags"
-    real_ctags.write_text("#!/bin/sh\n", encoding="utf-8")
-    real_ctags.chmod(real_ctags.stat().st_mode | stat.S_IEXEC)
-    install_dir = tmp_path / "install"
-    result = run_func(
-        'already_installed() { return 1; }\n'
-        'have_cmd() { [ "$1" = brew ]; }\n'
-        'brew() { echo "BREW $*"; }\n'
-        'install_ctags',
-        env={"JARVIS_BIN_DIR": str(install_dir), "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    assert result.returncode == 0
-    assert "BREW install universal-ctags" in result.stdout
-    assert (install_dir / "universal-ctags").is_symlink()
-
-
-def test_install_ctags_apt_get_links_ctags_after_install(tmp_path):
-    # Same dash-hyphen limitation as test_install_ctags_apt_get_when_root:
-    # the fake apt-get must be a real script on PATH, not a shell function.
-    fake_bin = tmp_path / "fakebin"
-    fake_bin.mkdir()
-    apt_get_stub = fake_bin / "apt-get"
-    apt_get_stub.write_text('#!/bin/sh\necho "APT $*"\n')
-    apt_get_stub.chmod(0o755)
-    real_ctags = fake_bin / "ctags"
-    real_ctags.write_text("#!/bin/sh\n", encoding="utf-8")
-    real_ctags.chmod(real_ctags.stat().st_mode | stat.S_IEXEC)
-    install_dir = tmp_path / "install"
-    result = run_func(
-        'already_installed() { return 1; }\n'
-        'have_cmd() { [ "$1" = apt-get ]; }\n'
-        'id() { echo 0; }\n'
-        'install_ctags',
-        env={"JARVIS_BIN_DIR": str(install_dir), "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    assert result.returncode == 0
-    assert "APT install -y -qq universal-ctags" in result.stdout
-    assert (install_dir / "universal-ctags").is_symlink()
 
 
 # ------------------------------------------------------ scip-swift installer ----
@@ -1264,8 +792,38 @@ def test_help_flag_exits_zero_and_prints_usage():
 
 
 def test_parse_args_sets_only():
-    result = run_func('parse_args --only scip; echo "ONLY=$ONLY"')
-    assert "ONLY=scip" in result.stdout
+    result = run_func('parse_args --only scip-typescript; echo "ONLY=$ONLY"')
+    assert "ONLY=scip-typescript" in result.stdout
+
+
+def test_removed_common_installers_are_rejected():
+    for removed in ("scip", "zoekt", "ctags", "jarvis-mcp"):
+        result = run_func(f"parse_args --only {removed}")
+        assert result.returncode != 0
+        assert "--only must be one of:" in result.stdout + result.stderr
+
+
+def test_usage_lists_only_language_installers():
+    text = SETUP_SH.read_text()
+    start = text.index("Options:")
+    end = text.index("Environment:", start)
+    usage = text[start:end]
+    for retained in (
+        "scip-swift", "scip-typescript", "scip-python", "scip-java", "bash-shim"
+    ):
+        assert retained in usage
+    for removed in ("scip,", "zoekt,", "ctags,", "jarvis-mcp"):
+        assert removed not in usage
+
+
+def test_common_installer_functions_are_removed():
+    text = SETUP_SH.read_text()
+    for function in (
+        "install_scip()", "install_zoekt()", "install_ctags()",
+        "install_jarvis_mcp()", "link_universal_ctags()",
+        "install_tarball_binary()", "confirm()",
+    ):
+        assert function not in text
 
 
 def test_parse_args_sets_force():
@@ -1289,31 +847,33 @@ def test_record_and_print_summary_roundtrip():
 
 
 def test_only_flag_runs_single_installer(tmp_path):
-    """--only scip must not attempt npm installers."""
+    """--only scip-python must not attempt the other npm installer."""
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     npm_log = tmp_path / "npm-called.txt"
     npm_stub = fake_bin / "npm"
     npm_stub.write_text(f'#!/bin/sh\necho called >> {npm_log}\n')
     npm_stub.chmod(0o755)
-    # Pre-place a scip stub so no download happens.
-    scip_stub = fake_bin / "scip"
-    scip_stub.write_text("#!/bin/sh\ntrue\n")
-    scip_stub.chmod(0o755)
+    # Pre-place scip-python so the selected installer skips without network.
+    install_bin = tmp_path / "bin"
+    install_bin.mkdir()
+    scip_python = install_bin / "scip-python"
+    scip_python.write_text("#!/bin/sh\ntrue\n")
+    scip_python.chmod(0o755)
 
     result = subprocess.run(
-        [POSIX_SH, str(SETUP_SH), "--only", "scip"],
+        [POSIX_SH, str(SETUP_SH), "--only", "scip-python"],
         capture_output=True, text=True,
         env={
             "PATH": f"{fake_bin}:/usr/bin:/bin",
             "HOME": str(tmp_path),
-            "JARVIS_BIN_DIR": str(tmp_path / "bin"),
+            "JARVIS_BIN_DIR": str(install_bin),
             "SHELL": "/bin/zsh",
         },
         stdin=subprocess.DEVNULL,
     )
     assert result.returncode == 0, result.stderr
-    assert not npm_log.exists(), "--only scip must not run npm installers"
+    assert not npm_log.exists(), "--only scip-python must not run npm installers"
 
 
 def _fake_bash(tmp_path, name: str, version_line: str) -> str:
@@ -1423,23 +983,3 @@ def test_install_bash_shim_advises_install_when_no_modern_bash(tmp_path):
     assert result.returncode == 0, "must not fail setup for users who never index Java"
     assert "brew install bash" in result.stdout + result.stderr
     assert not (tmp_path / "shims" / "bash").exists()
-
-
-def test_zoekt_release_repo_is_set():
-    """The zoekt binaries come from a dedicated public repo, not this one."""
-    assert run_func('echo "$ZOEKT_RELEASE_REPO"').stdout.strip() == "jarvis-intelligence/jarvis-index"
-
-def test_zoekt_release_repo_is_not_the_private_repo():
-    """The invariant, not just the value: GitHub serves release assets only to
-    viewers of the owning repo, so pointing zoekt downloads at the private
-    development repo 404s for every real user. This test is the guard against
-    that regression -- it is how the original outage would have been caught.
-
-    The non-empty assertion comes first deliberately: without it, an unset
-    ZOEKT_RELEASE_REPO makes `"" != "jarvis-intelligence/jarvis"` true and the test
-    passes vacuously, guarding nothing."""
-    release_repo = run_func('echo "$ZOEKT_RELEASE_REPO"').stdout.strip()
-    private_repo = run_func('echo "$JARVIS_REPO"').stdout.strip()
-    assert release_repo, "ZOEKT_RELEASE_REPO is unset"
-    assert private_repo, "JARVIS_REPO is unset"
-    assert release_repo != private_repo

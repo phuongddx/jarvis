@@ -8,12 +8,12 @@ jarvis/
 ├── tests/                   # Test suite (16 files)
 ├── docs/                    # Documentation
 ├── plans/                   # Implementation plans
-├── .github/workflows/       # CI: build-zoekt, publish-pypi, publish-mcp-registry,
-│                            #     sync-public-distribution, setup-smoke, test
-├── scripts/                 # Utilities
-│   └── check_versions.py    # Version consistency guard (3 fields across 2 files)
-├── setup.sh                 # Dependency bootstrapper (scip, zoekt, indexers)
-├── ZOEKT_COMMIT             # Pinned upstream sourcegraph/zoekt commit
+├── .github/workflows/       # CI: build-scip, build-zoekt, publish-native,
+│                            #     setup-smoke, test
+├── scripts/                 # Version/native release utilities
+│   └── check_versions.py    # Sole release-version readability guard
+├── setup.sh                 # Optional language-indexer bootstrapper
+├── SCIP_COMMIT / ZOEKT_COMMIT # Pinned native binary source commits
 ├── pyproject.toml           # uv-managed project config
 └── README.md                # User-facing getting started
 ```
@@ -63,7 +63,7 @@ jarvis/
 
 | File | Lines | Purpose | Key Exports |
 |------|-------|---------|-------------|
-| `setup.sh` | ~430 | POSIX-sh dependency bootstrapper: installs scip, zoekt, scip-swift, and the npm indexers into `~/.jarvis/bin`; detect-only for scip-java | `--only`, `--force` |
+| `setup.sh` | ~760 | POSIX-sh optional bootstrapper: installs one retained language indexer or the macOS Java bash shim into `~/.jarvis/bin` | `--only scip-swift|scip-typescript|scip-python|scip-java|bash-shim`, `--force` |
 | `ZOEKT_COMMIT` | 1 | Pinned upstream `sourcegraph/zoekt` commit that CI cross-compiles | — |
 
 ## Test Suite (`tests/`)
@@ -89,7 +89,7 @@ jarvis/
 | `test_index_cli.py` | index_cli.py | Full pipeline (e-2-e); marked `@pytest.mark.integration` — calls real scip-python/scip/zoekt binaries |
 | `test_index_status.py` | index_cli.py + query.py | Freshness snapshot, staleness detection |
 | `test_setup_sh.py` | setup.sh | Sources the script under `dash` (not `sh` — macOS `/bin/sh` accepts bashisms) and tests each function in isolation |
-| `test_check_versions.py` | scripts/check_versions.py | Version consistency across `pyproject.toml`, `server.json` (×2) — plugin manifests live in jarvis-index and version independently |
+| `test_check_versions.py` | scripts/check_versions.py | Reads the sole release version from `pyproject.toml`; plugin manifests live in jarvis-index and version independently |
 
 ### Fixtures (`tests/fixtures/`)
 
@@ -127,23 +127,22 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 ## Test Coverage
 
 - **Unit tests** cover all modules except `__init__.py` (dead stub) and `models.py` (trivial frozen dataclasses)
-- **Integration tests** (marked `@pytest.mark.integration`) run real SCIP indexers, `scip expt-convert`, and `zoekt-index` on a mini Python repo
+- **Integration tests** (marked `@pytest.mark.integration`) run real SCIP indexers, `scip expt-convert`, and `zoekt-git-index` on a mini Python repo
 - **Run tests:** `uv run pytest` (all), `uv run pytest -m "not integration"` (unit only), `uv run pytest -m integration` (real binaries only)
 
 ## CI Workflows
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `.github/workflows/build-zoekt.yml` | `ZOEKT_COMMIT` change or manual dispatch | Cross-compiles `zoekt-index`/`zoekt-webserver` for macOS+Linux (arm64/amd64) and publishes them to the **public** `jarvis-intelligence/jarvis-index` releases — upstream `sourcegraph/zoekt` ships no binaries at all, and this repo is private, so its own release assets 404 for an unauthenticated `setup.sh` |
-| `.github/workflows/publish-pypi.yml` | `release` event | Publishes versioned release to PyPI (`jarvis-mcp` package); uses GitHub Actions OIDC for auth |
-| `.github/workflows/publish-mcp-registry.yml` | `workflow_run` on publish-pypi completion | Publishes `server.json` to official MCP Registry (`io.github.phuongddx/jarvis`); runs after PyPI publish succeeds; retries publish up to 6x for eventual consistency |
-| `.github/workflows/sync-public-distribution.yml` | `release: published` or manual | Overwrites `jarvis-intelligence/jarvis-index` with the public distribution surface (`setup.sh`, `.claude-plugin/`, `plugin/`). That repo is a publication target, never edited by hand |
-| `.github/workflows/setup-smoke.yml` | `setup.sh`/test changes, PRs, manual | Runs `setup.sh` on `ubuntu-latest` (where `/bin/sh` is dash) and `macos-latest`: parse check, install, idempotency, full unit suite; path-filtered |
+| `.github/workflows/build-scip.yml` | `SCIP_COMMIT` change or manual dispatch | Cross-compiles the forked `scip` converter for four platform/arch pairs and publishes it to public `jarvis-intelligence/jarvis-index` releases for native packaging |
+| `.github/workflows/build-zoekt.yml` | `ZOEKT_COMMIT` change or manual dispatch | Cross-compiles `zoekt-git-index`/`zoekt-webserver` for four platform/arch pairs and publishes them to public `jarvis-intelligence/jarvis-index` releases for native packaging |
+| `.github/workflows/publish-native.yml` | GitHub Release published | Builds/smoke-tests four standalone archives, uploads archive+checksum assets to the public tap release, renders the checksum-pinned formula, validates it on four Homebrew environments, then commits `Formula/jarvis.rb` to `jarvis-intelligence/homebrew-jarvis` |
+| `.github/workflows/setup-smoke.yml` | `setup.sh`/test/workflow changes, PRs, manual | Parses `setup.sh` and runs `tests/test_setup_sh.py`; no live installer side effects |
 | `.github/workflows/test.yml` | Every push/PR | Runs unit test suite (`pytest -m "not integration"`); installs `semantic` extra so `test_semantic.py` tests actually run; no path filter (runs on every change) |
 
 ## Dependencies & Imports
 
-- **Runtime:** mcp[cli], protobuf, zstandard, httpx, tree-sitter + 16 curated grammar packages (base deps), watchdog (optional)
+- **Source runtime:** mcp[cli], protobuf, zstandard, httpx, tree-sitter + 16 curated grammar packages (base deps), watchdog (optional extra, bundled in the standalone archive)
 - **No ORM:** Direct sqlite3 usage throughout
 - **No async framework:** Pure sync code, single-threaded query path
 - **Minimal third-party:** ~150 lines of pure-dataclass models, ~200 lines of CLI glue
@@ -180,7 +179,7 @@ Index publishing writes a new versioned database, waits for graph/Zoekt completi
 3. For each dependent, fetch repo info from registry
 4. Return list with hop distances
 
-**Semantic path (`server.py` → `semantic.py`):**
+**Source-build semantic path (`server.py` → `semantic.py`; excluded from Homebrew):**
 1. `semanticSearch(repo, query, limit=10)` → embed query with the table's recorded `TableIdentity` (model, revision, and prefixes)
 2. Vector search the repo's LanceDB table (cosine metric)
 3. `symbol_search.search_symbols()` matches query tokens against the repo's SCIP symbol table (when a SCIP index exists) and resolves ranked candidates to definition locations

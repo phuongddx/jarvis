@@ -30,10 +30,10 @@ dashboard from starting.
   `current` pointer selects), per-tool capabilities, recovery guidance for
   degraded/failed runs, its package-graph edges (depends on / depended on
   by), and per-store storage sizes.
-- **Search** — one query fanned out three ways: Zoekt lexical hits, semantic
-  vector hits (when the repo was indexed with the `semantic` extra), and SCIP
-  symbol matches — scoped to one repo or across all. Any hit opens in the
-  in-browser source viewer.
+- **Search** — one query fanned out to Zoekt lexical hits and SCIP symbol
+  matches, scoped to one repo or across all. Source builds with semantic data
+  also include vector hits; the Homebrew package excludes semantic
+  dependencies. Any hit opens in the in-browser source viewer.
 - **Playground** — the ten MCP tools with parameter forms generated from
   their signatures; invoke any tool and inspect the raw JSON response and
   its latency. The fastest way to see exactly what an agent sees.
@@ -74,8 +74,6 @@ slug is the confirmation.
 - **Port already in use** — `jarvis dashboard` exits with `error: ...` and
   status 1. A second dashboard instance is the usual culprit; otherwise pick
   another port with `--port N`.
-- **Assets missing after a wheel install** (blank page, or 404 on `app.js`) —
-  the `dashboard_assets/` files ship inside the wheel; an install that
-  predates them does not have them. Reinstall over the top:
-  `pip install --force-reinstall jarvis-mcp` (or
-  `uv tool install --force jarvis-mcp`).
+- **Assets missing after a standalone install** (blank page, or 404 on
+  `app.js`) — dashboard assets are bundled in the archive. Recover the
+  installation with `brew reinstall jarvis`.

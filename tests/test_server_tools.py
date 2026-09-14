@@ -1241,7 +1241,19 @@ def test_index_repo_tool_preflight_missing_zoekt(tmp_path, monkeypatch):
     result = server.index_repo_tool(path=str(repo))
 
     assert "zoekt-git-index" in result["error"]
-    assert result["recovery"] == "sh setup.sh --only zoekt"
+    assert result["recovery"] == "brew reinstall jarvis, then retry indexing"
+
+
+def test_missing_jarvis_launcher_recommends_homebrew_reinstall(monkeypatch):
+    """The launcher is bundled with the Homebrew package, not installed by
+    setup.sh or the retired PyPI distribution."""
+    from jarvis import server
+
+    monkeypatch.setattr(server.sys, "executable", "/missing/python")
+    monkeypatch.setattr(server.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="brew reinstall jarvis"):
+        server._jarvis_bin()
 
 
 def test_index_repo_tool_preflight_not_a_git_repo(tmp_path, monkeypatch):

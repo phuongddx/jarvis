@@ -2,47 +2,18 @@
 # jarvis dependency bootstrapper.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
+#   sh setup.sh --only <component>
 #
-# STRICTLY POSIX sh: `curl | sh` ignores the shebang above and runs under the
-# system sh (dash on many Linux distros). No arrays, no [[ ]], no bashisms.
+# Run this reduced helper from a jarvis source checkout. STRICTLY POSIX sh:
+# `sh setup.sh` ignores the shebang above and runs under the system sh (dash on
+# many Linux distros). No arrays, no [[ ]], no bashisms.
 
 set -eu
 
 # ------------------------------------------------------------- versions ------
 
-# scip is installed from OUR release assets, not upstream scip-code/scip:
-# upstream through v0.9.0 never populates `global_symbols.relationships`
-# (scip-code/scip#464), which makes jarvis's typeHierarchy unanswerable on
-# every index. The fix (scip-code/scip#465) is merged in the public fork
-# phuongddx/scip; build-scip.yml cross-compiles that fork at the commit
-# pinned in the repo-root SCIP_COMMIT file and publishes the binaries to
-# SCIP_RELEASE_REPO. Exit ramp: when upstream merges #465 and cuts a
-# release, repoint this at scip-code/scip and delete build-scip.yml +
-# SCIP_COMMIT.
-#
-# Pinned deliberately, never "latest": query.py targets the v0.7.0-era
-# `scip expt-convert` SQLite schema (the fork build is v0.9.0 + the #465
-# fix, which only adds data to an existing column -- same schema).
-# tests/test_setup_sh.py asserts this never drifts from SCIP_COMMIT.
-SCIP_COMMIT_PIN="56791658a873"
-
-# Kept in sync with the repo-root ZOEKT_COMMIT file that CI builds from.
-# tests/test_setup_sh.py asserts the two never drift.
-ZOEKT_COMMIT_PIN="33f1f18af292"
-JARVIS_REPO="phuongddx/jarvis"
-
-# The zoekt and scip binaries are published to a separate PUBLIC repo.
-# jarvis's own repo is private, and GitHub serves release assets only to
-# viewers of the owning repo -- an unauthenticated `curl` against a private
-# repo's release 404s, which is every user running this script. Do not point
-# either back at JARVIS_REPO; tests/test_setup_sh.py asserts they differ.
-ZOEKT_RELEASE_REPO="jarvis-intelligence/jarvis-index"
-SCIP_RELEASE_REPO="jarvis-intelligence/jarvis-index"
-
 # scip-swift auto-rolls to the LATEST release at install time (resolved
-# from the GitHub Releases API — a user decision, unlike the exact-tag
-# scip/zoekt pins) and is guarded by this floor instead. v0.2.0/v0.2.1
+# from the GitHub Releases API — a user decision) and is guarded by this floor instead. v0.2.0/v0.2.1
 # silently ignore --build-tool xcodebuild (dispatch regression), and the
 # fix landed in 0.3.0 (upstream commit 9bcf1688), so the floor is
 # inclusive: a hypothetical 0.2.2 cut from the pre-fix branch would
@@ -79,35 +50,6 @@ log_warn() {
 
 log_error() {
 	echo "error: $1" >&2
-}
-
-# ---------------------------------------------------------------- prompt -----
-
-# Ask a y/n question. MUST read from /dev/tty, never stdin: under
-# `curl … | sh` stdin is the piped script source, so reading stdin would
-# consume script bytes or hit EOF instead of the user's answer.
-# Returns non-zero (i.e. "no") when there is no tty, so non-interactive runs
-# never hang and never silently opt in.
-confirm() {
-	# `[ -r /dev/tty ]` is NOT sufficient: the device node can exist and test as
-	# readable while no controlling terminal is attached (CI, a piped
-	# subprocess). Writing to it then fails with a raw "Device not configured"
-	# error that looks like a broken installer. Probe it for real instead.
-	#
-	# The subshell is load-bearing. POSIX requires the shell to ABORT on a
-	# redirection error against a special built-in, and `:` is one -- so a bare
-	# `{ : >/dev/tty; }` kills the script (dash exits 2) instead of returning
-	# false. Containing it in a subshell turns that abort into an exit status.
-	if ! ( : >/dev/tty ) 2>/dev/null; then
-		log_info "no terminal available — assuming no"
-		return 1
-	fi
-	printf '%s [y/N] ' "$1" >/dev/tty 2>/dev/null || return 1
-	read -r _answer </dev/tty 2>/dev/null || return 1
-	case "$_answer" in
-	y | Y | yes | YES) return 0 ;;
-	*) return 1 ;;
-	esac
 }
 
 # ------------------------------------------------------ platform detection ---
@@ -276,65 +218,10 @@ version_ge() {
 	return 0
 }
 
-# Download a .tar.gz plus its .sha256 sidecar, verify, extract one member,
-# and install it into bin_dir() under dest_name.
-#
-#   install_tarball_binary <tar_url> <sha_url> <member> <dest_name>
-install_tarball_binary() {
-	_tar_url=$1
-	_sha_url=$2
-	_member=$3
-	_dest_name=$4
-
-	_tmp=$(mktemp -d)
-	# Clean up the temp dir on every exit path, including failure.
-	# shellcheck disable=SC2064
-	trap "rm -rf '$_tmp'" EXIT
-
-	if ! download_to "$_tar_url" "${_tmp}/archive.tar.gz"; then
-		log_error "download failed: ${_tar_url}"
-		rm -rf "$_tmp"
-		trap - EXIT
-		return 1
-	fi
-
-	if ! download_to "$_sha_url" "${_tmp}/archive.sha256"; then
-		log_error "checksum download failed: ${_sha_url}"
-		rm -rf "$_tmp"
-		trap - EXIT
-		return 1
-	fi
-
-	# Sidecar format is "<digest>  <filename>"; take the first field.
-	_expected=$(cut -d' ' -f1 <"${_tmp}/archive.sha256")
-	if ! verify_sha256 "${_tmp}/archive.tar.gz" "$_expected"; then
-		rm -rf "$_tmp"
-		trap - EXIT
-		return 1
-	fi
-
-	if ! tar -xzf "${_tmp}/archive.tar.gz" -C "$_tmp" "$_member" 2>/dev/null; then
-		log_error "could not extract '${_member}' from archive"
-		rm -rf "$_tmp"
-		trap - EXIT
-		return 1
-	fi
-
-	ensure_bin_dir
-	mv "${_tmp}/${_member}" "$(bin_dir)/${_dest_name}"
-	chmod +x "$(bin_dir)/${_dest_name}"
-
-	rm -rf "$_tmp"
-	trap - EXIT
-}
-
 # Download a .tar.gz, verify it against an expected sha256 hex digest
-# supplied by the caller, extract one member, and install it into
-# bin_dir() under dest_name. Sibling of install_tarball_binary, not a
-# refactor of it: zoekt/scip releases publish .sha256 sidecars (that
-# helper's contract), while scip-swift stopped publishing sidecars at
-# v0.2.0 — GitHub's API offers the same guarantee via the immutable,
-# server-computed asset `digest` field, which the caller passes here.
+# supplied by the caller, extract one member, and install it into bin_dir()
+# under dest_name. scip-swift stopped publishing .sha256 sidecars; GitHub's
+# API provides the immutable, server-computed asset digest instead.
 #
 #   install_tarball_binary_with_digest <tar_url> <expected_hex> <member> <dest_name>
 install_tarball_binary_with_digest() {
@@ -379,9 +266,7 @@ install_tarball_binary_with_digest() {
 
 # Download a bare (non-archive) binary plus its .sha256 sidecar, verify it, and
 # install it into bin_dir() under dest_name. Separate from
-# install_tarball_binary rather than a refactor of it: the only difference is
-# the missing extraction step, and four callers already depend on the tarball
-# helper's behavior.
+# a bare binary rather than an archive.
 #
 #   install_raw_binary <url> <sha_url> <dest_name>
 install_raw_binary() {
@@ -426,10 +311,6 @@ install_raw_binary() {
 
 # ------------------------------------------------------------ installers -----
 
-scip_asset_name() {
-	echo "scip-$1-$2.tar.gz"
-}
-
 # Overridable so tests can point at fixtures instead of the real filesystem.
 BASH_SHIM_CANDIDATES="${BASH_SHIM_CANDIDATES:-/opt/homebrew/bin/bash /usr/local/bin/bash}"
 
@@ -462,8 +343,7 @@ bash_at_least_44() {
 # macOS ships only 3.2, which breaks every Maven-built Java repo. Linux ships
 # >= 4.4, so this is a no-op there.
 #
-# Never runs `brew`: installing a shell is the user's call, and setup.sh
-# otherwise only downloads pinned release binaries into its own bin dir.
+# Never runs `brew`: installing a shell is the user's call.
 #
 # Always symlinks a known-good bash into the shim dir on darwin, even when
 # `command -v bash` here is already modern: this is setup.sh's OWN PATH at
@@ -505,157 +385,6 @@ install_bash_shim() {
 	return 0
 }
 
-# True when the scip that setup.sh manages (bin_dir first, PATH as the
-# fallback -- same resolution order as already_installed) reports the pinned
-# fork commit in its --version output. Go stamps the build's vcs revision, so
-# an upstream v0.9.0 binary or a stale fork build both fail the match.
-installed_scip_matches_pin() {
-	if [ -x "$(bin_dir)/scip" ]; then
-		"$(bin_dir)/scip" --version 2>/dev/null | grep -q "$SCIP_COMMIT_PIN"
-	elif have_cmd scip; then
-		scip --version 2>/dev/null | grep -q "$SCIP_COMMIT_PIN"
-	else
-		return 1
-	fi
-}
-
-install_scip() {
-	_os=$1
-	_arch=$2
-
-	# Version-gated, not merely presence-gated like the other installers: the
-	# whole point of the fork build is replacing upstream v0.9.0 binaries that
-	# existing installs already have on disk. A bare already_installed check
-	# would strand every one of them on broken typeHierarchy forever; matching
-	# the pin re-installs exactly once per pin bump and then skips again.
-	if [ "${FORCE:-0}" != "1" ] && installed_scip_matches_pin; then
-		log_info "scip: already installed, skipping"
-		return 0
-	fi
-
-	_asset=$(scip_asset_name "$_os" "$_arch")
-	_base="https://github.com/${SCIP_RELEASE_REPO}/releases/download/scip-${SCIP_COMMIT_PIN}"
-
-	log_info "scip: installing fork build ${SCIP_COMMIT_PIN} (upstream v0.9.0 + relationships fix)"
-	if install_tarball_binary "${_base}/${_asset}" "${_base}/${_asset}.sha256" scip scip; then
-		log_info "scip: installed"
-		# bin_dir is appended to PATH, so a scip already installed elsewhere
-		# keeps winning at runtime -- jarvis would silently index with the
-		# broken binary despite the fresh install landing above.
-		_path_scip=$(command -v scip 2>/dev/null || true)
-		if [ -n "$_path_scip" ] && [ "$_path_scip" != "$(bin_dir)/scip" ] \
-			&& ! "$_path_scip" --version 2>/dev/null | grep -q "$SCIP_COMMIT_PIN"; then
-			log_warn "scip: ${_path_scip} is earlier on PATH and predates the fix -- remove it or jarvis will keep using it"
-		fi
-	else
-		log_error "scip: install failed — see https://github.com/${SCIP_RELEASE_REPO}/releases"
-		return 1
-	fi
-}
-
-zoekt_asset_name() {
-	echo "zoekt-$1-$2.tar.gz"
-}
-
-# zoekt ships as one tarball containing both binaries. Upstream
-# sourcegraph/zoekt publishes no releases at all, so these come from our own
-# releases in the public jarvis-intelligence/jarvis-index repo -- NOT from jarvis's own
-# repo, which is private and would 404 (see build-zoekt.yml, and
-# ZOEKT_RELEASE_REPO above).
-#
-# zoekt-git-index, not zoekt-index: jarvis indexes from the git tree so
-# gitignored content never enters the index. Nothing calls zoekt-index any
-# more, and it is deliberately not installed as a fallback — falling back
-# would silently reintroduce junk indexing.
-install_zoekt() {
-	_os=$1
-	_arch=$2
-
-	if [ "${FORCE:-0}" != "1" ] && already_installed zoekt-git-index && already_installed zoekt-webserver; then
-		log_info "zoekt: already installed, skipping"
-		return 0
-	fi
-
-	_asset=$(zoekt_asset_name "$_os" "$_arch")
-	# ZOEKT_BASE_URL is overridable so tests can serve a local tarball.
-	_base="${ZOEKT_BASE_URL:-https://github.com/${ZOEKT_RELEASE_REPO}/releases/download/zoekt-${ZOEKT_COMMIT_PIN}}"
-
-	log_info "zoekt: installing (pinned ${ZOEKT_COMMIT_PIN})"
-
-	_tmp=$(mktemp -d)
-	# shellcheck disable=SC2064
-	trap "rm -rf '$_tmp'" EXIT
-
-	if ! download_to "${_base}/${_asset}" "${_tmp}/z.tar.gz"; then
-		log_error "zoekt: download failed (${_base}/${_asset})"
-		rm -rf "$_tmp"; trap - EXIT; return 1
-	fi
-	if ! download_to "${_base}/${_asset}.sha256" "${_tmp}/z.sha256"; then
-		log_error "zoekt: checksum download failed"
-		rm -rf "$_tmp"; trap - EXIT; return 1
-	fi
-	_expected=$(cut -d' ' -f1 <"${_tmp}/z.sha256")
-	if ! verify_sha256 "${_tmp}/z.tar.gz" "$_expected"; then
-		rm -rf "$_tmp"; trap - EXIT; return 1
-	fi
-	if ! tar -xzf "${_tmp}/z.tar.gz" -C "$_tmp" zoekt-git-index zoekt-webserver 2>/dev/null; then
-		log_error "zoekt: archive did not contain both binaries"
-		rm -rf "$_tmp"; trap - EXIT; return 1
-	fi
-
-	ensure_bin_dir
-	for _b in zoekt-git-index zoekt-webserver; do
-		mv "${_tmp}/${_b}" "$(bin_dir)/${_b}"
-		chmod +x "$(bin_dir)/${_b}"
-	done
-
-	rm -rf "$_tmp"; trap - EXIT
-	log_info "zoekt: installed"
-}
-
-# universal-ctags' own binary is literally named "ctags" (both Homebrew's
-# and Debian's packages install .../bin/ctags, never .../universal-ctags --
-# confirmed via `brew info universal-ctags`: "Conflicts with: ctags
-# (because both install `ctags` binaries)"). zoekt-git-index's own
-# detection is exec.LookPath("universal-ctags") -- a literal name match,
-# not "any ctags" -- so a bare `ctags` on PATH is invisible to it. Symlink
-# it into bin_dir() under the name zoekt actually looks for; bin_dir() is
-# already on the user's PATH via ensure_on_path, so this makes both
-# zoekt's subprocess lookup and jarvis's own presence check succeed.
-link_universal_ctags() {
-	_real_ctags=$(command -v ctags) || {
-		log_warn "universal-ctags: installed but no 'ctags' binary found on PATH -- sym: will stay unavailable"
-		return 0
-	}
-	ensure_bin_dir
-	ln -sf "$_real_ctags" "$(bin_dir)/universal-ctags"
-}
-
-# zoekt auto-discovers universal-ctags on PATH (or $CTAGS_COMMAND) at index
-# time; shards built without it carry no symbol sections, so zoekt's sym:
-# queries and its symbol-definition ranking silently return nothing
-# (index/builder.go: HasSymbols = CTagsPath != ""). Unlike the pinned
-# tarball binaries, ctags comes from the system package manager: it is a
-# build tool zoo of parsers, not a single static binary. Absence is a warn,
-# not a failure -- it degrades sym: only. NOTE: shards indexed before this
-# install stay symbol-less until `jarvis reindex <slug>`.
-install_ctags() {
-	if already_installed universal-ctags; then
-		log_info "universal-ctags: already installed, skipping"
-		return 0
-	fi
-	if have_cmd brew; then
-		log_info "universal-ctags: installing via brew"
-		brew install universal-ctags && link_universal_ctags
-	elif have_cmd apt-get && [ "$(id -u)" = "0" ]; then
-		log_info "universal-ctags: installing via apt-get"
-		apt-get update -qq && apt-get install -y -qq universal-ctags && link_universal_ctags
-	else
-		log_warn "universal-ctags: no supported installer (need brew, or apt-get as root) -- zoekt sym: queries will return nothing until it is installed (then reindex)"
-		return 0
-	fi
-}
-
 install_scip_swift() {
 	_os=$1
 	_arch=$2
@@ -674,8 +403,7 @@ install_scip_swift() {
 	# `digest` is the server-computed, immutable sha256. Constructing the
 	# URL from the tag instead is the documented anti-pattern — the asset
 	# naming convention already changed once (v0.1.2 -> v0.2.0).
-	# SCIP_SWIFT_API_URL is overridable so tests can serve local JSON
-	# (ZOEKT_BASE_URL pattern).
+	# SCIP_SWIFT_API_URL is overridable so tests can serve local JSON.
 	_api="${SCIP_SWIFT_API_URL:-https://api.github.com/repos/${SCIP_SWIFT_REPO}/releases/latest}"
 
 	_meta=$(mktemp -d)
@@ -760,7 +488,7 @@ install_scip_swift() {
 		;;
 	esac
 
-	# file:// exists solely as the test seam (ZOEKT_BASE_URL pattern);
+	# file:// exists solely as the test seam;
 	# real release assets are always served over https.
 	case "$_url" in
 	https://* | file://*) : ;;
@@ -776,8 +504,7 @@ install_scip_swift() {
 		rm -rf "$_meta"; trap - EXIT; return 1
 	fi
 
-	# Version-gated, not presence-gated (installed_scip_matches_pin
-	# pattern): installs auto-roll to latest, so a stale v0.1.2 left on
+	# Version-gated, not presence-gated: installs auto-roll to latest, so a stale v0.1.2 left on
 	# disk must upgrade, not skip. Compare the installed binary against
 	# the RESOLVED tag; bin_dir first, PATH fallback.
 	if [ "${FORCE:-0}" != "1" ]; then
@@ -874,10 +601,7 @@ install_scip_python() {
 	install_npm_indexer scip-python @sourcegraph/scip-python
 }
 
-# Installs upstream's single-file launcher. Unattended, like scip/zoekt/
-# scip-swift: the old confirm() prompt existed because the docker image is
-# 6.75GB, and confirm() returns false without a TTY, which would make
-# `curl | sh` silently skip scip-java.
+# Installs upstream's single-file launcher without an interactive prompt.
 install_scip_java() {
 	if [ "${FORCE:-0}" != "1" ] && already_installed scip-java; then
 		log_info "scip-java: already installed, skipping"
@@ -905,39 +629,6 @@ install_scip_java() {
 	fi
 }
 
-# Warms uv's tool cache for jarvis-mcp so the plugin's `uvx --from jarvis-mcp
-# ... jarvis-server` first connect doesn't pay a cold resolve-and-build cost
-# inside the MCP client's ~30s connect window (jarvis-index#4). `uv tool
-# install` is what a user runs by hand today; this just does it automatically.
-# Soft skip without uv, matching install_npm_indexer's missing-npm branch:
-# this bootstraps a Python package, not one of the native binaries setup.sh
-# otherwise installs.
-install_jarvis_mcp() {
-	if [ "${FORCE:-0}" != "1" ] && already_installed jarvis-server; then
-		log_info "jarvis-mcp: already installed, skipping"
-		return 0
-	fi
-
-	if ! have_cmd uv; then
-		log_warn "jarvis-mcp: uv not found — skipping. Install from https://docs.astral.sh/uv/, then: uv tool install jarvis-mcp"
-		return 0
-	fi
-
-	if [ "${FORCE:-0}" = "1" ]; then
-		_uv_force="--force"
-	else
-		_uv_force=""
-	fi
-
-	log_info "jarvis-mcp: installing via uv (warms the cache the plugin's uvx launch reuses)"
-	if uv tool install $_uv_force jarvis-mcp >/dev/null 2>&1; then
-		log_info "jarvis-mcp: installed"
-	else
-		log_error "jarvis-mcp: uv tool install failed — try manually: uv tool install jarvis-mcp"
-		return 1
-	fi
-}
-
 # ------------------------------------------------------------ orchestration --
 
 ONLY=""
@@ -950,14 +641,15 @@ usage() {
 	cat <<'EOF'
 Usage: setup.sh [options]
 
-Installs jarvis's external binary dependencies into ~/.jarvis/bin, plus
-jarvis-mcp itself via `uv tool install` (pre-warms the cache the plugin's
-uvx launch reuses, so the first MCP connect doesn't compile from source).
+Run this reduced helper from a jarvis source checkout. It installs optional
+language indexers that are not bundled with jarvis's Homebrew distribution.
+jarvis, scip, zoekt, and universal-ctags are installed by:
+brew install jarvis-intelligence/jarvis/jarvis
 
 Options:
-  --only <name>   Install just one dependency. One of:
-                  scip, zoekt, ctags, scip-swift, scip-typescript,
-                  scip-python, scip-java, bash-shim, jarvis-mcp
+  --only <name>   Install just one component. One of:
+                  scip-swift, scip-typescript, scip-python,
+                  scip-java, bash-shim
   --force         Reinstall even if already present
   --help          Show this message
 
@@ -975,7 +667,15 @@ parse_args() {
 				log_error "--only requires a value"
 				return 1
 			fi
-			ONLY=$2
+			case "$2" in
+			scip-swift | scip-typescript | scip-python | scip-java | bash-shim)
+				ONLY=$2
+				;;
+			*)
+				log_error "--only must be one of: scip-swift, scip-typescript, scip-python, scip-java, bash-shim"
+				return 1
+				;;
+			esac
 			shift 2
 			;;
 		--force)
@@ -1042,15 +742,11 @@ main() {
 
 	# `if` form rather than `should_run X && run_one …`: unambiguous exit-status
 	# semantics under `set -e` across dash and bash-posix.
-	if should_run scip; then run_one scip install_scip "$OS" "$ARCH"; fi
-	if should_run zoekt; then run_one zoekt install_zoekt "$OS" "$ARCH"; fi
-	if should_run ctags; then run_one ctags install_ctags; fi
 	if should_run scip-swift; then run_one scip-swift install_scip_swift "$OS" "$ARCH"; fi
 	if should_run scip-typescript; then run_one scip-typescript install_scip_typescript; fi
 	if should_run scip-python; then run_one scip-python install_scip_python; fi
 	if should_run scip-java; then run_one scip-java install_scip_java; fi
 	if should_run bash-shim; then install_bash_shim "$OS"; fi
-	if should_run jarvis-mcp; then run_one jarvis-mcp install_jarvis_mcp; fi
 
 	ensure_on_path
 	print_summary

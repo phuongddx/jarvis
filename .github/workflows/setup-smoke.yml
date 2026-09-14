@@ -1,21 +1,19 @@
-# Runs setup.sh on real Linux and macOS runners.
+# Tests the reduced bootstrap helper under real Linux and macOS shells.
 #
-# Why: setup.sh must work under whatever `sh` the host provides. On
-# ubuntu-latest that is dash, which rejects the bashisms macOS's bash-in-posix-
-# mode silently accepts -- so this job is the real guard for the POSIX
-# constraint, and the only Linux coverage available without a local container.
+# dash rejects bashisms that macOS's bash-in-posix mode silently accepts, so
+# the matrix plus explicit dash installation remain the honest POSIX guard.
 name: setup-smoke
 
 on:
   push:
     branches: [main]
-    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml", "tests/fixtures/mini_xcode_repo/**", "src/jarvis/**"]
+    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml"]
   pull_request:
-    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml", "tests/fixtures/mini_xcode_repo/**", "src/jarvis/**"]
+    paths: ["setup.sh", "tests/test_setup_sh.py", ".github/workflows/setup-smoke.yml"]
   workflow_dispatch:
 
 jobs:
-  smoke:
+  setup-tests:
     strategy:
       fail-fast: false
       matrix:
@@ -33,102 +31,24 @@ jobs:
       - name: Reject bashisms explicitly
         run: |
           set -eu
-          # Fail loudly if setup.sh contains constructs dash cannot parse.
-          # `sh -n` is a parse-only check: no installer side effects.
+          # Parse-only check: no installer side effects.
           sh -n setup.sh
           echo "setup.sh parses under the system sh"
 
-      - name: Install scip and zoekt via setup.sh
-        run: |
-          set -eu
-          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only scip
-          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only zoekt
-          ls -la "${RUNNER_TEMP}/ci-bin"
-
-      - name: Verify the installed binaries run
-        run: |
-          set -eu
-          bin="${RUNNER_TEMP}/ci-bin"
-          "${bin}/scip" --version
-          "${bin}/zoekt-webserver" -version
-          # zoekt-git-index has no -version flag and `-h` exits non-zero.
-          "${bin}/zoekt-git-index" -h >help.txt 2>&1 || true
-          grep -q "zoekt-git-index" help.txt
-
-      # The only guard that install_scip_swift's latest-resolution + floor +
-      # digest path actually resolves against the real GitHub API. Without it
-      # a repo rename, a lost release tag, or an API change 404s silently, and
-      # the first report arrives from a user whose Swift index never builds.
-      # Runs on both platforms: macOS runners are arm64 and download for real,
-      # Linux exercises the not-available skip branch (which must still exit 0).
-      - name: Install scip-swift via setup.sh
-        run: |
-          set -eu
-          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only scip-swift
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            "${RUNNER_TEMP}/ci-bin/scip-swift" --version
-          fi
-
-      - name: Re-run to prove idempotency
-        run: |
-          set -eu
-          JARVIS_BIN_DIR="${RUNNER_TEMP}/ci-bin" sh setup.sh --only scip 2>&1 | tee out.txt
-          grep -qi "already installed" out.txt
-
       - uses: astral-sh/setup-uv@v5
+
+      - name: Install dash
+        run: |
+          set -eu
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq dash
+          else
+            brew install dash
+          fi
 
       - name: Run the setup.sh unit tests
         run: |
           set -eu
-          # dash is the interpreter tests/test_setup_sh.py prefers; on Linux it
-          # is already present, on macOS the suite falls back with a clear
-          # failure if absent.
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq dash
-          else
-            brew install dash
-          fi
           uv sync
           uv run pytest tests/test_setup_sh.py -v
-
-      # The authoritative proof that _swift_indexer_cmd's xcodebuild dispatch
-      # works through a real install (the v0.2.x regression this milestone
-      # exists to escape). Only macOS runners have Xcode; the Linux leg still
-      # executes this step and takes the skip branch, mirroring the install
-      # guard above.
-      - name: Index the Swift fixture through jarvis (macOS only)
-        run: |
-          set -eu
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # Standalone repo on purpose: language detection reads `git ls-files`
-            # and zoekt indexes git — indexing the in-checkout fixture dir would
-            # read the jarvis repo's own git metadata instead.
-            rm -rf "${RUNNER_TEMP}/mini_xcode_repo"
-            cp -R tests/fixtures/mini_xcode_repo "${RUNNER_TEMP}/mini_xcode_repo"
-            git -C "${RUNNER_TEMP}/mini_xcode_repo" init -q
-            git -C "${RUNNER_TEMP}/mini_xcode_repo" add -A
-            git -C "${RUNNER_TEMP}/mini_xcode_repo" -c user.email=ci@jarvis.local -c user.name=ci commit -qm fixture
-
-            # ci-bin first so the digest-verified scip-swift (and zoekt/scip)
-            # win over anything preinstalled on the runner; the data dir stays
-            # under RUNNER_TEMP so the runner's ~/.jarvis is never touched.
-            export PATH="${RUNNER_TEMP}/ci-bin:$PATH"
-            export JARVIS_DATA_DIR="${RUNNER_TEMP}/jarvis-data"
-
-            # Visible in logs on purpose: a future v0.4.0 still passes the
-            # floor but changes what this smoke should expect elsewhere.
-            scip-swift --version
-
-            uv run jarvis index "${RUNNER_TEMP}/mini_xcode_repo" --slug mini-xcode-repo
-
-            # Tree cleanliness (the cache-dir contract): everything scip-swift
-            # writes must live under JARVIS_DATA_DIR, never in the indexed
-            # tree. The one-shot xcshareddata/swiftpm/configuration write is
-            # accepted and deliberately not asserted against.
-            test ! -e "${RUNNER_TEMP}/mini_xcode_repo/.scip-cache"
-            test ! -e "${RUNNER_TEMP}/mini_xcode_repo/.build"
-            test -d "${JARVIS_DATA_DIR}/cache/scip-swift/mini-xcode-repo"
-            echo "fixture indexed; tree clean; cache under JARVIS_DATA_DIR"
-          else
-            echo "not macOS — skipping the Swift index smoke (install already proved the skip branch)"
-          fi

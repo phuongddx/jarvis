@@ -9,6 +9,7 @@ Subcommands: index, list, status, reindex, forget, watch.
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 import contextlib
 import importlib.util
 import json
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from jarvis import config
 from jarvis import jobs
+from jarvis import runtime
 from jarvis.graph import (
     GraphStore,
     clear_graph_edges_for_repo,
@@ -104,6 +106,14 @@ MIN_SCIP_VERSION = (0, 9, 0)
 # guards against.
 MIN_SCIP_SWIFT_VERSION = (0, 3, 0)
 
+_BUNDLED_BINARY_REMEDY = "brew reinstall jarvis, then rerun indexing"
+_OPTIONAL_INDEXER_REMEDIES = {
+    "scip-python": "sh setup.sh --only scip-python",
+    "scip-typescript": "sh setup.sh --only scip-typescript",
+    "scip-java": "sh setup.sh --only scip-java",
+    "scip-swift": "sh setup.sh --only scip-swift",
+}
+
 
 # PARTIAL_STATUS and UNKNOWN_LANGUAGE now live in registry.py (imported
 # above): the status vocabulary is the registry's contract, and the CLI
@@ -124,7 +134,7 @@ _BASH_SHIM_TOKENS = ("LAUNCHER_ARGS[@]", "unbound variable")
 _BASH_SHIM_REMEDY = (
     "scip-java's generated javac wrapper requires bash >= 4.4, but this machine's "
     "default bash is older (macOS ships 3.2). Install a newer bash "
-    "(`brew install bash`), re-run setup.sh to create the shim, then reindex."
+    "(`brew install bash`), run `sh setup.sh --only bash-shim`, then reindex."
 )
 
 
@@ -145,8 +155,8 @@ class MissingBinaryError(IndexingError):
     """A pipeline step's executable was not on PATH.
 
     Deliberately its own type beside IndexingError (narrowed FALL-04, spec
-    §12): a missing binary is a setup.sh problem. For the REQUIRED stages
-    (zoekt, grammars) it stays a loud hard failure; inside the optional
+    §12): a missing binary is a dependency-installation problem. For the
+    REQUIRED stages (zoekt, grammars) it stays a loud hard failure; inside the optional
     SCIP stage it classifies the attempt as `unavailable` — exit-0
     degraded with the remedy recorded, never a fabricated SCIP snapshot.
     IS-A IndexingError, so every existing except-site keeps working.
@@ -421,18 +431,23 @@ def _run(cmd: list[str], *, cwd: Path, step: str,
     coverage check parses.
 
     A missing executable raises `FileNotFoundError`, not a non-zero exit, so
-    it is translated into an `IndexingError` naming `setup.sh` — the same
-    remedy `_scip_version_output` gives. This matters most for
-    `zoekt-git-index`: every install predating the switch has `zoekt-index`
-    instead, and there is deliberately no fallback to it, because falling back
-    would silently reintroduce indexing of gitignored content.
+    it is translated into an `IndexingError` with a binary-specific remedy:
+    bundled binaries are reinstalled through Homebrew, while retained language
+    indexers use their setup.sh selector.
     """
     merged = {**os.environ, **env} if env else None
     try:
         result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged)
     except FileNotFoundError as exc:
+        binary = cmd[0]
+        if binary in {"scip", "zoekt-git-index", "zoekt-webserver"}:
+            remedy = _BUNDLED_BINARY_REMEDY
+        else:
+            remedy = _OPTIONAL_INDEXER_REMEDIES.get(
+                binary, f"install {binary}, then rerun indexing"
+            )
         raise MissingBinaryError(
-            f"{step} failed: {cmd[0]} not found on PATH — run setup.sh"
+            f"{step} failed: {binary} not found on PATH — {remedy}"
         ) from exc
     if result.returncode != 0:
         raise IndexingError(f"{step} failed ({' '.join(cmd)}):\n{result.stdout}\n{result.stderr}")
@@ -508,7 +523,10 @@ def _scip_version_output() -> str:
     try:
         result = subprocess.run(["scip", "--version"], capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
-        raise IndexingError("scip not found on PATH — run setup.sh") from exc
+        raise IndexingError(
+            "scip not found on PATH — "
+            "brew reinstall jarvis, then retry indexing"
+        ) from exc
     return f"{result.stdout}\n{result.stderr}"
 
 
@@ -517,7 +535,9 @@ def _scip_swift_version_output() -> str:
     try:
         result = subprocess.run(["scip-swift", "--version"], capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
-        raise IndexingError("scip-swift not found on PATH — run setup.sh") from exc
+        raise IndexingError(
+            "scip-swift not found on PATH — sh setup.sh --only scip-swift"
+        ) from exc
     return f"{result.stdout}\n{result.stderr}"
 
 
@@ -540,8 +560,8 @@ def check_scip_swift_version() -> None:
         raise IndexingError(
             f"scip-swift v{current} is too old (need >= v{required}): versions before "
             "0.3.0 dispatch xcodebuild incorrectly for .xcodeproj repos and produce "
-            "broken indexes. Re-run setup.sh, and remove any older scip-swift "
-            "earlier on PATH."
+            "broken indexes. Run `sh setup.sh --only scip-swift`, and remove any older "
+            "scip-swift earlier on PATH."
         )
 
 
@@ -558,7 +578,8 @@ def check_scip_version() -> None:
         raise IndexingError(
             f"scip v{current} is too old (need >= v{required}): it cannot read scip.proto's "
             "typed_range oneof, so occurrence positions are dropped and navigation returns "
-            "empty results. Re-run setup.sh, and remove any older scip earlier on PATH."
+            "empty results. Run `brew reinstall jarvis`, then `jarvis reindex <slug>`, "
+            "and remove any older scip earlier on PATH."
         )
 
 
@@ -782,6 +803,13 @@ def _prepare_semantic_stage(
     feed `build_syntax_index`'s shared-parse callback. Optional and
     non-fatal: a missing `semantic` extra returns None with a hint, any
     other failure warns and lets the baseline publish proceed."""
+    if runtime.is_frozen():
+        print(
+            "semantic indexing skipped — semantic search is not included "
+            "in the Homebrew binary distribution",
+            file=sys.stderr,
+        )
+        return None
     try:
         from jarvis import semantic
     except ImportError:
@@ -1587,6 +1615,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
     # (4) this repo must not have declined before.
     if (
         getattr(args, "offer_semantic", False)
+        and not runtime.is_frozen()
         and _semantic_extra_missing()
         and _at_interactive_tty()
     ):
@@ -2038,8 +2067,18 @@ def _warn_removed_env() -> None:
         )
 
 
+def _distribution_version() -> str:
+    try:
+        return distribution_version("jarvis-mcp")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis")
+    parser.add_argument(
+        "--version", action="version", version=f"jarvis {_distribution_version()}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     index_parser = subparsers.add_parser("index", help="index a repo")

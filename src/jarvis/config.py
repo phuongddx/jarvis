@@ -68,12 +68,12 @@ def shim_dir(root: Path | None = None) -> Path:
 
     Currently just `bash`: scip-java's generated javac wrapper is
     `#!/usr/bin/env bash` with `set -eu` and an unguarded `"${LAUNCHER_ARGS[@]}"`,
-    which errors on bash < 4.4 — the bash macOS ships. `setup.sh` writes the
-    symlink here; `index_cli._java_indexer_env()` puts this directory first on
-    PATH for the indexer subprocess.
+    which errors on bash < 4.4 — the bash macOS ships. `setup.sh --only
+    bash-shim` writes the symlink here; `index_cli._java_indexer_env()` puts
+    this directory first on PATH for the indexer subprocess.
 
-    Deliberately NOT under `bin/`: that holds pinned binaries setup.sh
-    downloaded and owns, this holds links to system tools it did not.
+    Deliberately NOT under `bin/`: that holds optional indexer binaries
+    setup.sh downloaded and owns, this holds links to system tools it did not.
     """
     return data_dir(root) / "shims"
 

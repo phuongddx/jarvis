@@ -96,7 +96,9 @@ def test_offline_baseline_publishes_and_answers_navigation(
         assert entry.status == "degraded"  # enabled SCIP unavailable
         assert entry.scip_state == "unavailable"
         assert entry.scip_enabled is True  # failure never changes enablement
-        assert "run setup.sh" in (entry.scip_failure_reason or "")
+        assert "brew reinstall jarvis" in (
+            entry.scip_failure_reason or ""
+        )
     finally:
         registry.close()
 

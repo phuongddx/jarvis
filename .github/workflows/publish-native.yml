@@ -1,0 +1,207 @@
+name: publish-native
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [darwin_arm64, darwin_amd64, linux_amd64, linux_arm64]
+        include:
+          - platform: darwin_arm64
+            runner: macos-latest
+          - platform: darwin_amd64
+            runner: macos-15-intel
+          - platform: linux_amd64
+            runner: ubuntu-latest
+          - platform: linux_arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build one checked native archive
+        run: bash scripts/ci_native_build.sh "$PLATFORM"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      - name: Smoke test extracted archive
+        run: |
+          set -eu
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)"
+          mkdir -p "$RUNNER_TEMP/extract" "$RUNNER_TEMP/data"
+          rm -rf "$RUNNER_TEMP/mini_py_repo"
+          cp -R tests/fixtures/mini_py_repo "$RUNNER_TEMP/mini_py_repo"
+          git -C "$RUNNER_TEMP/mini_py_repo" init -q
+          git -C "$RUNNER_TEMP/mini_py_repo" config user.email smoke@example.invalid
+          git -C "$RUNNER_TEMP/mini_py_repo" config user.name "Native Smoke"
+          git -C "$RUNNER_TEMP/mini_py_repo" add greeter.py
+          git -C "$RUNNER_TEMP/mini_py_repo" commit -qm "fixture"
+          tar -xzf ".native-release/release/jarvis_${version}_${PLATFORM}.tar.gz" \
+            -C "$RUNNER_TEMP/extract"
+          npm install --silent -g @sourcegraph/scip-python
+          export NATIVE_SMOKE_EXTRA_PATH="$(dirname "$(command -v scip-python)")"
+          .native-release/project/bin/python scripts/native_smoke.py \
+            --root "$RUNNER_TEMP/extract/jarvis" \
+            --repo "$RUNNER_TEMP/mini_py_repo" \
+            --data-dir "$RUNNER_TEMP/data" \
+            --expected-version "$version"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: .native-release/release/*
+          if-no-files-found: error
+
+  stage-release:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: release
+      - name: Verify tag, upload assets, and render formula
+        env:
+          GH_TOKEN: ${{ secrets.JARVIS_TAP_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -eu
+          version="$(uv version --short)"
+          tagged="${RELEASE_TAG#v}"
+          if [ "$version" != "$tagged" ]; then
+            echo "release tag $RELEASE_TAG does not match pyproject version $version" >&2
+            exit 1
+          fi
+          for platform in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
+            test -f "release/jarvis_${version}_${platform}.tar.gz"
+            test -f "release/jarvis_${version}_${platform}.tar.gz.sha256"
+          done
+          if ! gh release view "v${version}" \
+              --repo jarvis-intelligence/homebrew-jarvis >/dev/null 2>&1; then
+            gh release create "v${version}" \
+              --repo jarvis-intelligence/homebrew-jarvis \
+              --title "jarvis ${version}" \
+              --notes "Standalone jarvis ${version}."
+          fi
+          gh release upload "v${version}" release/* --clobber \
+            --repo jarvis-intelligence/homebrew-jarvis
+          uv run python scripts/generate_homebrew_formula.py \
+            --version "$version" --release-tag "v${version}" \
+            --checksum-dir release > jarvis.rb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: jarvis.rb
+          if-no-files-found: error
+
+  validate-homebrew:
+    needs: stage-release
+    if: github.event_name == 'release'
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: homebrew-formula
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: Homebrew/actions/setup-homebrew@v4
+      - name: Install and test formula
+        run: |
+          set -eu
+          brew install --formula ./jarvis.rb
+          brew test --formula ./jarvis.rb
+          prefix="$(brew --prefix jarvis)"
+          test -x "$prefix/bin/jarvis"
+          test -x "$prefix/bin/jarvis-server"
+          test "$(readlink "$prefix/bin/jarvis")" = "../libexec/jarvis"
+          test "$(readlink "$prefix/bin/jarvis-server")" = "../libexec/jarvis"
+          test "$(basename "$(command -v jarvis)")" = jarvis
+          test "$(basename "$(command -v jarvis-server)")" = jarvis-server
+          test -x "$prefix/libexec/_internal/native-bin/universal-ctags"
+      - name: Smoke test installed formula
+        run: |
+          set -eu
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)"
+          prefix="$(brew --prefix jarvis)"
+          rm -rf "$RUNNER_TEMP/mini_py_repo"
+          cp -R tests/fixtures/mini_py_repo "$RUNNER_TEMP/mini_py_repo"
+          git -C "$RUNNER_TEMP/mini_py_repo" init -q
+          git -C "$RUNNER_TEMP/mini_py_repo" config user.email smoke@example.invalid
+          git -C "$RUNNER_TEMP/mini_py_repo" config user.name "Native Smoke"
+          git -C "$RUNNER_TEMP/mini_py_repo" add greeter.py
+          git -C "$RUNNER_TEMP/mini_py_repo" commit -qm "fixture"
+          npm install --silent -g @sourcegraph/scip-python
+          NATIVE_SMOKE_EXTRA_PATH="$(dirname "$(command -v scip-python)")" \
+            python3 scripts/native_smoke.py \
+              --root "$prefix" \
+              --repo "$RUNNER_TEMP/mini_py_repo" \
+              --data-dir "$RUNNER_TEMP/homebrew-data" \
+              --expected-version "$version"
+      - name: Reinstall restores embedded binaries
+        run: |
+          set -eu
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)"
+          prefix="$(brew --prefix jarvis)"
+          rm "$prefix/libexec/_internal/native-bin/scip"
+          test ! -e "$prefix/libexec/_internal/native-bin/scip"
+          brew reinstall --formula ./jarvis.rb
+          test -x "$prefix/libexec/_internal/native-bin/scip"
+          NATIVE_SMOKE_EXTRA_PATH="$(dirname "$(command -v scip-python)")" \
+            python3 scripts/native_smoke.py \
+              --root "$prefix" \
+              --repo "$RUNNER_TEMP/mini_py_repo" \
+              --data-dir "$RUNNER_TEMP/homebrew-reinstall-data" \
+              --expected-version "$version"
+      - name: Audit formula without blocking on custom-tap policy warnings
+        run: brew audit --formula ./jarvis.rb || true
+
+  publish-formula:
+    needs: validate-homebrew
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: homebrew-formula
+          path: formula
+      - name: Download and publish generated formula
+        env:
+          GH_TOKEN: ${{ secrets.JARVIS_TAP_TOKEN }}
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          rm -rf tap
+          gh auth setup-git
+          gh repo clone jarvis-intelligence/homebrew-jarvis tap -- --depth=1
+          mkdir -p tap/Formula
+          cp formula/jarvis.rb tap/Formula/jarvis.rb
+          cd tap
+          git config user.name "jarvis release bot"
+          git config user.email "noreply@jarvis-intelligence.dev"
+          git add Formula/jarvis.rb
+          if git diff --quiet --cached; then
+            echo "formula already current at ${version}"
+          else
+            git commit -m "chore: publish jarvis ${version}"
+            git push
+          fi

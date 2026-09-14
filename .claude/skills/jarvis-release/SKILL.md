@@ -1,142 +1,119 @@
 ---
 name: jarvis-release
-description: Cut a new release of the jarvis repo itself (not a user's indexed repo) — bump the version consistently across pyproject.toml, server.json, and uv.lock, add a CHANGELOG.md entry, open and merge a chore/release PR, tag and publish a GitHub Release, and confirm the publish-pypi/publish-mcp-registry pipeline actually completes. Use this whenever the user asks to release a new version, cut a release, ship vX.Y.Z, publish to PyPI, or asks what's needed to release recent changes — even if they only name one or two of these steps, since they're one pipeline and skipping any of them leaves the release half-done.
+description: Cut a new jarvis release — bump the sole version source, verify tests and uv.lock, merge a release PR, sign the tag, publish its GitHub Release, and confirm the native publish-native workflow builds, validates, and publishes the Homebrew formula. Use whenever the user asks to release, ship, or publish jarvis, even if they name only part of the pipeline.
 ---
 
 # Releasing jarvis
 
-This captures jarvis's actual release process — every command here was run for real and verified working while cutting v0.3.1. Follow it in order; the steps are load-bearing on each other (CI gates the merge, the merge commit is what gets tagged, the tag is what the GitHub Release publishes, and publishing the release is what triggers PyPI/registry publishing).
+jarvis ships to end users as a Homebrew standalone formula. Development still
+uses uv and a Cython wheel, but that wheel is only PyInstaller input: no wheel,
+source distribution, package-manager registration, or registry descriptor is
+published.
 
-## Before starting: what's actually being released?
+The public formula lives in `jarvis-intelligence/homebrew-jarvis`.
+`.github/workflows/publish-native.yml` generates and publishes it. It requires
+the source repository's `JARVIS_TAP_TOKEN` secret to have contents write access
+to that tap.
 
-`main` must already contain everything you're about to release. If there's a pending feature/fix branch that hasn't been merged yet, merge that first (its own PR, its own CI, its own review) — the release step that follows is purely mechanical version-bumping on top of an already-correct `main`. Don't conflate "ship my feature" with "cut a release"; they're sequential, not the same PR.
+## 1. Prepare the release branch
 
-## 1. Decide the version bump
+1. Ensure `main` already contains the behavior being released.
+2. Choose the semantic version.
+3. Set only `version = "X.Y.Z"` in `pyproject.toml`.
+4. Run the unit suite:
 
-Semver, and the CHANGELOG is explicit about the reasoning behind past bumps — read `CHANGELOG.md`'s existing entries before picking, they set the calibration:
+   ```bash
+   uv run pytest -m "not integration" -rs
+   ```
 
-- **Patch** (`0.3.0` → `0.3.1`): pure bug fixes, no new capability. v0.2.1 and v0.3.1 were both patches.
-- **Minor** (`0.2.x` → `0.3.0`): new capability, even if delivered alongside fixes. v0.3.0's own CHANGELOG entry says "Minor rather than patch: Java/Kotlin repos are indexable for the first time, `--search-only` is a new mode..." — that annotation is the model to follow when it's a judgment call.
-- **Major**: hasn't happened yet in this repo's history; a breaking change to the MCP tool surface or CLI would warrant it.
+5. Run `uv lock` so the lockfile records the new project version.
+6. Replace the `Unreleased` CHANGELOG heading with `## [X.Y.Z] - YYYY-MM-DD`,
+   preserving the entry's existing subsections.
+7. Run `uv run python scripts/check_versions.py`.
+8. Commit `CHANGELOG.md`, `pyproject.toml`, and `uv.lock` as
+   `chore: release X.Y.Z`, then open the release PR.
 
-If it's genuinely ambiguous (a fix that also quietly changes behavior), say what you're picking and why in one line before proceeding — this is the one place in the whole pipeline that isn't mechanical, and it's cheap to confirm before an irreversible PyPI upload locks it in.
+Watch the PR checks with `gh pr checks <PR-number> --watch --interval 15`.
+Do not merge a red release PR.
 
-## 2. Bump the version in all 3 files
+## 2. Tag and publish the GitHub Release
 
-These must all end up identical, or CI's tag/version guard (see step 6) fails the release:
-
-| File | What to change |
-|---|---|
-| `pyproject.toml` | `version = "X.Y.Z"` |
-| `server.json` | **two** fields: the top-level `"version"` and `packages[0].version` |
-| `uv.lock` | **never hand-edit.** Run `uv lock` — it updates this package's own self-referential version entry (`Updated jarvis-mcp vX.Y.Z-1 -> vX.Y.Z` in its output) and re-resolves nothing else changes if no deps moved |
-
-Grep to confirm consistency before committing: `grep -rn '"version"\|^version' pyproject.toml server.json | grep -v uv.lock` — or just run `uv run python scripts/check_versions.py`.
-
-The Claude Code and Codex plugins are NOT part of this bump: their source of truth is
-`jarvis-intelligence/jarvis-index` (`plugin/` + `.claude-plugin/` + `.codex-plugin/`
-there), versioned independently. When a release changes behavior the plugin skills
-describe, update those skills in jarvis-index directly and bump
-`plugin/.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` there so installed
-plugins see an update. Keep its `.mcp.json` `--from` floor a valid `>=` minimum
-against PyPI.
-
-## 3. Add the CHANGELOG.md entry
-
-New `## [X.Y.Z] - YYYY-MM-DD` section at the **top**, above the previous entry. Use `### Added` / `### Fixed` / `### Changed` subsections matching whichever apply. Write the *root cause*, not just "fixed a bug" — every existing entry in this file explains the mechanism (what broke, why, what the fix actually does), because that's what makes the changelog useful to someone debugging a regression months later. Look at the two or three most recent entries for tone and depth before writing a new one.
-
-## 4. Verify locally before pushing anything
-
-```bash
-uv run pytest -m "not integration" -q          # must be green
-grep -qF "mcp-name: io.github.phuongddx/jarvis" README.md && echo "marker present"
-
-```
-
-The second check matters because `publish-pypi.yml` hard-fails the release if this marker (which the MCP Registry uses to verify PyPI ownership) is ever missing from `README.md` — cheap to catch here instead of after a tag is already pushed.
-
-Since the tree-sitter syntax baseline (v0.8.0), the grammar packages are base
-dependencies, so the wheel build and smoke jobs exercise them automatically:
-the cibuildwheel test-command runs the real-parser tests inside every wheel,
-and `publish-pypi.yml`'s smoke step additionally parses `def f(): pass` with a
-real `ParserPool` in the installed-wheel env. When a grammar/runtime pin
-moves, rerun the wheel-only resolution matrix
-(`uv pip compile pyproject.toml --only-binary :all:` over CPython
-{3.12, 3.13, 3.14} × {aarch64/x86_64-apple-darwin, aarch64/x86_64-manylinux_2_28})
-— all 12 resolves must succeed with no source build before cutting the
-release.
-
-## 5. Commit, branch, PR
-
-```bash
-git checkout -b chore/release-X.Y.Z
-git add CHANGELOG.md pyproject.toml server.json uv.lock
-git commit -m "chore: release X.Y.Z"
-git push -u origin chore/release-X.Y.Z
-
-gh pr create --base main --head chore/release-X.Y.Z --title "chore: release X.Y.Z" \
-  --body "Patch/minor release for <one-line summary>. See CHANGELOG.md."
-```
-
-Wait for CI properly instead of hand-rolling a poll loop — `gh pr checks <N> --watch` blocks until every check reaches a final state and is far more reliable than re-checking in a bash `while`/`until` loop (which is easy to get wrong: `gh pr checks` exits non-zero while checks are pending, which trips up naive loop conditions and can look like a clean exit when it wasn't):
-
-```bash
-gh pr checks <PR-number> --watch --interval 15
-```
-
-If a check fails, stop — investigate the failure (`gh run view <run-id>`), don't force-merge past red CI. This is a public package release; a broken merge here ships broken to PyPI.
-
-Once green:
-
-```bash
-gh pr merge <PR-number> --merge --delete-branch=false
-```
-
-## 6. Tag the merge commit
+After the release PR merges:
 
 ```bash
 git checkout main && git pull origin main
-git tag -a vX.Y.Z -m "vX.Y.Z" <merge-commit-sha>
+git tag -s vX.Y.Z -m "vX.Y.Z" <merge-commit-sha>
 git push origin vX.Y.Z
+gh release create vX.Y.Z --title "vX.Y.Z — <short summary>" --notes-file <notes>
 ```
 
-**Use `-a -m`, not a plain `git tag vX.Y.Z <sha>`.** This repo has `tag.gpgsign = true` in its git config, which forces every tag to be annotated+signed; a bare lightweight-tag invocation fails with a cryptic `fatal: no tag message?` because git tries to open an editor for the annotation message non-interactively. `-a -m "vX.Y.Z"` supplies that message directly and the signing happens automatically. Verify with `git tag -v vX.Y.Z` if anything looks off — it should show a `gpg: Good signature` line.
+The repository requires a GPG-signed tag. Verify `git tag -v vX.Y.Z` if the
+push or release reports a signature problem.
 
-## 7. Create the GitHub Release
-
-This is the step that actually triggers publishing — `publish-pypi.yml` listens for `release: published`. Look at 2-3 recent releases (`gh release view v0.3.0 --json body -q .body`) for the exact tone/structure before writing a new one; the pattern is consistently: one-line hook, an `## Install` block (Claude Code plugin + standalone paths), a `## What changed`/`## Fixed` section explaining the mechanism, a platform/scope footer sentence, and a link to `CHANGELOG.md`.
+Publishing the GitHub Release triggers `publish-native.yml` in the source
+repository. Its release notes should tell users to run:
 
 ```bash
-gh release create vX.Y.Z --title "vX.Y.Z — <short summary>" --notes "$(cat <<'EOF'
-<one-line hook>
-
-## Install
-...
-
-## Fixed / What changed
-...
-
-See [CHANGELOG.md](https://github.com/phuongddx/jarvis/blob/main/CHANGELOG.md).
-EOF
-)"
+brew install jarvis-intelligence/jarvis/jarvis
 ```
 
-## 8. Confirm the publish pipeline actually finished
+`publish-native.yml` also accepts manual dispatch. A manual run executes only
+the four platform build and extracted-archive smoke jobs; it never stages tap
+release assets, validates or publishes Homebrew, or publishes the formula.
+Use a GitHub Release when the full publication chain is required.
 
-Publishing the release triggers two workflows in sequence — `publish-pypi.yml` (on `release: published`) runs the unit suite, checks the tag matches the packaged version, builds, verifies the wheel and the registry marker, smoke-tests a clean install, and publishes via PyPI trusted publishing; then `publish-mcp-registry.yml` (on `workflow_run`, only after `publish-pypi.yml` succeeds) publishes `server.json` to the official MCP Registry. Don't consider the release done until both show `success` — a red `publish-pypi.yml` run with a tag already pushed is a broken, half-shipped release that needs a *new* patch version to fix (you cannot re-upload or delete a PyPI version):
+## 3. Confirm the native publish pipeline
+
+Capture and watch the run:
 
 ```bash
-gh run list --repo phuongddx/jarvis --workflow=publish-pypi.yml --limit 1
-gh run watch <run-id> --repo phuongddx/jarvis --exit-status   # or gh run view <run-id> if it already finished
-gh run list --repo phuongddx/jarvis --workflow=publish-mcp-registry.yml --limit 1
+run_id="$(gh run list --repo phuongddx/jarvis \
+  --workflow publish-native.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh run watch "$run_id" --repo phuongddx/jarvis --exit-status
+gh run view "$run_id" --repo phuongddx/jarvis --json jobs \
+  --jq '.jobs[] | [.name, .conclusion] | @tsv'
 ```
 
-**Verifying on PyPI itself:** don't trust `https://pypi.org/pypi/<pkg>/json`'s top-level `info.version` field alone — PyPI is eventually consistent and that field lags behind a just-published version by anywhere from seconds to a couple minutes (this is called out in `publish-mcp-registry.yml`'s own comments, which is exactly why that workflow retries on 404 rather than failing on the first miss). Check the full release list instead, which updates immediately:
+Do not report success until all of these are true:
+
+1. All four `build` matrix jobs pass:
+   `darwin_arm64`, `darwin_amd64`, `linux_amd64`, and `linux_arm64`.
+2. Staging passes: all eight archive/checksum assets are uploaded to the
+   public tap's `vX.Y.Z` release and the formula is rendered.
+3. All four `validate-homebrew` matrix jobs pass:
+   `macos-latest`, `macos-15-intel`, `ubuntu-latest`, and `ubuntu-24.04-arm`.
+4. `publish-formula` commits generated `Formula/jarvis.rb` to
+   `jarvis-intelligence/homebrew-jarvis`.
+
+A failure before the formula commit can normally be investigated and the
+failed workflow jobs rerun; staging is deliberately idempotent. Never edit the
+generated formula manually. If a committed formula is defective, stop and get
+a human release decision before publishing a patch.
+
+## 4. Confirm the public tap and local install
+
+Check the generated formula commit:
 
 ```bash
-curl -s https://pypi.org/pypi/<package-name>/json | python3 -c "import json,sys; print(sorted(json.load(sys.stdin)['releases'].keys()))"
+gh api repos/jarvis-intelligence/homebrew-jarvis/commits \
+  --jq '.[] | select(.commit.message == "chore: publish jarvis X.Y.Z") | .sha'
 ```
 
-## 9. Report back
+Then validate the actual user path on a clean-enough machine:
 
-Summarize concretely: which PR(s) merged (with numbers/URLs), the tag, the release URL, and the final status of both publish workflows. If anything in steps 6-8 failed partway (tag pushed but release workflow red, say), say exactly what state things are in — a half-published release needs a human decision about how to recover, not a silent retry.
+```bash
+brew install jarvis-intelligence/jarvis/jarvis && jarvis --version
+test "$(basename "$(command -v jarvis-server)")" = jarvis-server
+```
+
+If an earlier version is installed, `brew update && brew upgrade jarvis` must
+reach `X.Y.Z`; use `brew reinstall jarvis` only to recover a damaged local
+installation.
+
+## 5. Report the release
+
+Report the release PR, tag and GitHub Release URL, `publish-native.yml` run
+URL, the four build and four validation conclusions, the public tap formula
+commit SHA, and the locally installed version. If any step failed, state the
+last completed step exactly — do not retry silently or cut a patch without a
+decision.

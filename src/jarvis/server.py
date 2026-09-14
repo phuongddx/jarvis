@@ -65,7 +65,7 @@ def _jarvis_bin() -> str:
         return found
     raise RuntimeError(
         "the `jarvis` command could not be located next to this interpreter "
-        f"({Path(sys.executable).parent}) or on PATH; reinstall jarvis-mcp"
+        f"({Path(sys.executable).parent}) or on PATH; brew reinstall jarvis"
     )
 
 
@@ -513,8 +513,8 @@ def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
     Returns an explicit capability error when the index carries no
     relationship data — unpatched `scip expt-convert` (upstream through
     v0.9.0) does not populate `global_symbols.relationships`, so an empty
-    result would wrongly imply the symbol has no supertypes. Reindexing
-    with the fork build setup.sh installs makes this self-heal."""
+    result would wrongly imply the symbol has no supertypes. Reinstalling
+    the jarvis Homebrew package and reindexing makes this self-heal."""
     try:
         resolved, supertypes, subtypes, freshness = _service().type_hierarchy(repo, symbol)
     except Exception as exc:
@@ -634,7 +634,7 @@ def _spawn_index(path: str, *, semantic: bool,
         return {
             "error": "zoekt-git-index was not found on PATH; a first index "
                      "cannot be built without it",
-            "recovery": "sh setup.sh --only zoekt",
+            "recovery": "brew reinstall jarvis, then retry indexing",
         }
     resolved = Path(path).expanduser().resolve()
     index_cli.ensure_git_repo(resolved)

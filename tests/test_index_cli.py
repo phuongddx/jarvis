@@ -5,6 +5,7 @@ CLI binaries (marked `@pytest.mark.integration` — skipped if unavailable).
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -805,6 +806,8 @@ def test_check_scip_version_rejects_v070(monkeypatch):
     message = str(exc.value)
     assert "0.7.0" in message
     assert "0.9.0" in message, "must state the required floor"
+    assert "brew reinstall jarvis" in message
+    assert "jarvis reindex" in message
 
 
 def test_check_scip_version_accepts_v090(monkeypatch):
@@ -841,7 +844,7 @@ def test_check_scip_swift_version_rejects_v021(monkeypatch):
     message = str(exc.value)
     assert "0.2.1" in message, "must name the installed version"
     assert "0.3.0" in message, "must state the required floor"
-    assert "setup.sh" in message, "must name the recovery path"
+    assert "sh setup.sh --only scip-swift" in message, "must name the exact recovery command"
 
 
 def test_check_scip_swift_version_accepts_v030_real_format(monkeypatch):
@@ -862,16 +865,27 @@ def test_check_scip_swift_version_tolerates_unparseable(monkeypatch):
     cli.check_scip_swift_version()  # must not raise
 
 
+def test_scip_version_output_missing_binary_names_homebrew_remedy(monkeypatch):
+    """A missing bundled binary points to the Homebrew package."""
+    import jarvis.index_cli as cli
+
+    def _no_binary(*_args, **_kwargs):
+        raise FileNotFoundError("scip")
+
+    monkeypatch.setattr(cli.subprocess, "run", _no_binary)
+    with pytest.raises(cli.IndexingError, match="brew reinstall jarvis"):
+        cli._scip_version_output()
+
+
 def test_scip_swift_version_output_missing_binary_names_setup_sh(monkeypatch):
-    """A missing binary surfaces as IndexingError naming setup.sh, mirroring
-    _scip_version_output's FileNotFoundError wrap."""
+    """A missing optional binary names its retained setup.sh selector."""
     import jarvis.index_cli as cli
 
     def _no_binary(*_args, **_kwargs):
         raise FileNotFoundError("scip-swift")
 
     monkeypatch.setattr(cli.subprocess, "run", _no_binary)
-    with pytest.raises(cli.IndexingError, match="setup.sh"):
+    with pytest.raises(cli.IndexingError, match=r"setup\.sh --only scip-swift"):
         cli._scip_swift_version_output()
 
 
@@ -935,14 +949,33 @@ def test_run_returns_the_completed_process(tmp_path: Path):
     assert result.stdout.strip() == "hello"
 
 
-def test_run_turns_a_missing_binary_into_a_setup_remedy(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("binary", "remedy"),
+    [
+        ("scip", "brew reinstall jarvis, then rerun indexing"),
+        ("zoekt-git-index", "brew reinstall jarvis, then rerun indexing"),
+        ("zoekt-webserver", "brew reinstall jarvis, then rerun indexing"),
+        ("scip-python", "sh setup.sh --only scip-python"),
+        ("scip-typescript", "sh setup.sh --only scip-typescript"),
+        ("scip-java", "sh setup.sh --only scip-java"),
+        ("scip-swift", "sh setup.sh --only scip-swift"),
+    ],
+)
+def test_run_names_a_binary_specific_recovery(
+    tmp_path: Path, monkeypatch, binary: str, remedy: str
+):
     """A missing binary raised a bare FileNotFoundError, which says nothing
-    about how to fix it. Matters most for the zoekt-index -> zoekt-git-index
-    rename: existing installs must re-run setup.sh to get the new binary."""
-    from jarvis.index_cli import IndexingError, _run
+    about how to fix it. Bundled binaries belong to Homebrew; retained
+    language indexers still belong to setup.sh."""
+    import jarvis.index_cli as index_cli
 
-    with pytest.raises(IndexingError, match="setup.sh"):
-        _run(["definitely-not-a-real-binary"], cwd=tmp_path, step="fake step")
+    def _missing(*_args, **_kwargs):
+        raise FileNotFoundError(binary)
+
+    monkeypatch.setattr(index_cli.subprocess, "run", _missing)
+    with pytest.raises(index_cli.MissingBinaryError, match=remedy) as excinfo:
+        index_cli._run([binary], cwd=tmp_path, step=f"{binary} fake")
+    assert binary in str(excinfo.value)
 
 
 @pytest.mark.integration
@@ -4391,3 +4424,53 @@ def test_index_repo_releases_lock_on_failure(tmp_path, monkeypatch):
     with pytest.raises(Exception):
         index_cli.index_repo(repo_dir)
     assert jobs.lock_state(config.repo_slug(repo_dir.name)).held is False
+
+
+def test_version_flag_reports_distribution_version(capsys):
+    from jarvis import index_cli as cli
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--version"])
+    assert raised.value.code == 0
+    assert "jarvis " in capsys.readouterr().out
+
+
+def test_semantic_offer_is_structurally_disabled_in_frozen_build(monkeypatch, tmp_path):
+    from jarvis import index_cli as cli
+    from jarvis import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(cli, "index_repo", lambda *args, **kwargs: "frozen")
+    monkeypatch.setattr(
+        cli,
+        "_semantic_extra_missing",
+        lambda: (_ for _ in ()).throw(AssertionError("frozen build must not offer")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_at_interactive_tty",
+        lambda: (_ for _ in ()).throw(AssertionError("frozen build must not prompt")),
+    )
+    args = argparse.Namespace(path=str(tmp_path), slug="frozen", offer_semantic=True)
+    assert cli._cmd_index(args) == 0
+
+
+def test_frozen_semantic_skip_names_homebrew_distribution(monkeypatch, tmp_path, capsys):
+    from jarvis import index_cli as cli
+    from jarvis import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    assert cli._prepare_semantic_stage(tmp_path, "frozen", tmp_path, (), None) is None
+    assert "not included in the Homebrew binary distribution" in capsys.readouterr().err
+
+
+def test_frozen_semantic_install_hint_never_mentions_uv(monkeypatch):
+    from jarvis import runtime
+    from jarvis.embeddings import semantic_install_hint
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    frozen_hint = semantic_install_hint()
+    assert "Homebrew binary distribution" in frozen_hint
+    assert "uv" not in frozen_hint
+    monkeypatch.setattr(runtime, "is_frozen", lambda: False)
+    assert "uv" in semantic_install_hint()

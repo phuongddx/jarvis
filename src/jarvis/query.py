@@ -358,9 +358,9 @@ def relationship_data_present(conn: sqlite3.Connection) -> bool:
     that converter produced, and reporting an empty result would assert that
     a type has no supertypes rather than that we cannot tell.
 
-    Self-healing by design: setup.sh now installs a fork build carrying the
-    scip#465 fix, so this flips to True on the first reindex with it -- no
-    code change needed.
+    Self-healing by design: the jarvis Homebrew package bundles a build
+    carrying the scip#465 fix, so this flips to True on the first reindex
+    with it -- no code change needed.
     """
     row = conn.execute("SELECT 1 FROM global_symbols WHERE relationships IS NOT NULL LIMIT 1").fetchone()
     return row is not None
@@ -793,12 +793,13 @@ class QueryService:
                     "typeHierarchy unavailable for this index: no symbol carries relationship "
                     "data. This index was built with an unpatched `scip` (upstream through "
                     "v0.9.0 never populates global_symbols.relationships — scip#464). "
-                    "setup.sh now installs a fixed build: re-run setup.sh, then "
-                    "`jarvis reindex <slug>`. Do not read this as 'this type has no "
+                    "the jarvis Homebrew package includes a fixed build: run "
+                    "`brew reinstall jarvis`, then `jarvis reindex <slug>`. "
+                    "Do not read this as 'this type has no "
                     "supertypes' — it is missing data, not an empty hierarchy."
                 ),
                 reason="no SCIP relationship data in this snapshot",
-                recovery=f"jarvis reindex {repo}",
+                recovery=f"brew reinstall jarvis, then jarvis reindex {repo}",
                 freshness=freshness,
             )
         resolved = self._resolved(conn, symbol)

@@ -1,12 +1,8 @@
 # jarvis
 
-<!-- mcp-name: io.github.phuongddx/jarvis -->
-
 [![CI](https://github.com/phuongddx/jarvis/actions/workflows/test.yml/badge.svg)](https://github.com/phuongddx/jarvis/actions/workflows/test.yml)
-[![PyPI](https://img.shields.io/pypi/v/jarvis-mcp.svg)](https://pypi.org/project/jarvis-mcp/)
-[![Python](https://img.shields.io/pypi/pyversions/jarvis-mcp.svg)](https://pypi.org/project/jarvis-mcp/)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%20%2F%20%20Linux-lightgrey)](https://pypi.org/project/jarvis-mcp/)
-[![License: MIT](https://img.shields.io/pypi/l/jarvis-mcp.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20arm64%2Fx86__64%20%7C%20Linux%20arm64%2Fx86__64-lightgrey)](#requirements-and-limits)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-server-2e5aa8)](https://modelcontextprotocol.io)
 
 **Your coding agent should not spend its context window on grep.**
@@ -18,14 +14,14 @@ misses call sites.
 
 jarvis precomputes a local code-intelligence layer so your agent calls
 `findReferences` for exact occurrences, `goToDefinition` for the defining
-range, `callHierarchy` for call paths, and `semanticSearch` for plain-language
-questions — **ten MCP tools** for Claude Code, Cursor, or any MCP client.
+range, `callHierarchy` for call paths, and `searchCode` for precise lexical
+search — **ten MCP tools** for Claude Code, Cursor, or any MCP client.
 Your code and indexes never leave your machine.
 
 | | |
 |---|---|
 | **Without jarvis** | Grep → comments, tests, imports mixed with real hits → opens files to filter → guesses at call sites → burns context on search instead of reasoning |
-| **With jarvis** | `findReferences("AuthService")` → exact file-and-range occurrences → `callHierarchy` for the graph → `semanticSearch("where is token refresh handled?")` → answers in milliseconds |
+| **With jarvis** | `findReferences("AuthService")` → exact file-and-range occurrences → `callHierarchy` for the graph → `searchCode("token refresh")` → answers without opening every match |
 
 <p align="center">
   <img src="docs/assets/demo.gif" width="780" alt="grep returns noisy results vs jarvis findReferences returning 10 exact file:line:col occurrences">
@@ -35,11 +31,21 @@ Your code and indexes never leave your machine.
 
 ## Quick start
 
-**1. Install** (Tree-sitter syntax baseline ships in the wheel — no external binaries needed):
+**1. Install the standalone binary:**
 
 ```bash
-uv tool install jarvis-mcp
+brew install jarvis-intelligence/jarvis/jarvis
 ```
+
+Linux users need [Homebrew/Linuxbrew](https://docs.brew.sh/Homebrew-on-Linux)
+installed first. The formula supports macOS arm64/x86_64 and Linux
+arm64/x86_64, installs both `jarvis` and `jarvis-server`, and embeds Python
+3.12, dashboard assets, tree-sitter libraries, `watch`, `scip`,
+`zoekt-git-index`, and `zoekt-webserver`. Homebrew supplies
+`universal-ctags`. No Python, uv, pip, or PyPI installation is required.
+
+Upgrade with `brew upgrade jarvis`; recover a damaged installation with
+`brew reinstall jarvis`.
 
 **2. Index a repo** (slug defaults to the directory name):
 
@@ -76,6 +82,9 @@ inherit your shell's), use the absolute path from `which jarvis-server`.
 <details>
 <summary>Claude Code plugin (registers MCP + ships agent skills)</summary>
 
+Install the Homebrew binary first. The plugin adds jarvis skills and can
+register the already-installed `jarvis-server`.
+
 ```
 /plugin marketplace add jarvis-intelligence/jarvis-index
 /plugin install jarvis@jarvis
@@ -83,29 +92,34 @@ inherit your shell's), use the absolute path from `which jarvis-server`.
 </details>
 
 <details>
-<summary>Full precise navigation — optional SCIP/Zoekt enrichment</summary>
+<summary>Optional language indexers</summary>
 
-For exact references, call hierarchy, and type hierarchy on TypeScript/TSX,
-Python, Java/Kotlin, and Swift, install external indexer binaries:
+The standalone package includes the SCIP converter and both Zoekt binaries.
+The Homebrew formula does not install `setup.sh`; from a jarvis source
+checkout, install the optional per-language indexer for your repo:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/jarvis-intelligence/jarvis-index/main/setup.sh | sh
-jarvis reindex /path/to/your/repo
-```
+| Language | Installer | Toolchain |
+|---|---|---|
+| TypeScript/TSX | `sh setup.sh --only scip-typescript` | Node.js/npm |
+| Python | `sh setup.sh --only scip-python` | Node.js/npm |
+| Java/Kotlin | `sh setup.sh --only scip-java` | JDK; Kotlin repos require Kotlin 2.2.0 exactly |
+| Swift | `sh setup.sh --only scip-swift` | Xcode on macOS arm64 |
 
-Without them, `documentSymbols` and `goToDefinition` still work via the
-Tree-sitter baseline (17 languages); `findReferences`, `callHierarchy`, and
-`typeHierarchy` require SCIP data and return a capability error with recovery
-guidance if it's missing.
+For Maven-built Java repositories on macOS, also install a modern Bash with
+`brew install bash`, then run `sh setup.sh --only bash-shim` from that same
+source checkout. Reindex after adding an indexer. Without the matching
+indexer, `documentSymbols` and `goToDefinition` still work via Tree-sitter
+where coverage exists;
+`findReferences`, `callHierarchy`, and `typeHierarchy` return recovery
+guidance.
 </details>
 
 <details>
-<summary>Optional extras</summary>
+<summary>Not included</summary>
 
-```bash
-uv tool install "jarvis-mcp[watch]"      # + watchdog, for `jarvis watch`
-uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers, for semanticSearch
-```
+`semanticSearch` is registered for MCP compatibility but is excluded from the
+standalone distribution. It returns a Homebrew-specific unavailability error;
+lexical search and symbol search remain available.
 </details>
 
 ## MCP tools
@@ -118,7 +132,7 @@ uv tool install "jarvis-mcp[semantic]"   # + lancedb/sentence-transformers, for 
 | `typeHierarchy` | Supertypes/subtypes |
 | `documentSymbols` | Outline of every symbol defined in one file |
 | `searchCode` | Zoekt lexical/regex search, optionally filtered to one repo |
-| `semanticSearch` | Natural-language search fused with lexical + symbol hits |
+| `semanticSearch` | Returns the Homebrew distribution's semantic-unavailability error |
 | `blastRadius` | Which other indexed repos depend on a package, up to 2 hops |
 | `getIndexStatus` | Published commit, freshness, staleness vs. working tree |
 | `indexRepo` | Build an index for a git repo at `path` |
@@ -139,7 +153,8 @@ A localhost web console over the same `~/.jarvis` data the CLI and MCP server re
 
 ## Requirements and limits
 
-- **macOS and Linux only.** Windows is not supported.
+- **macOS arm64/x86_64 and Linux arm64/x86_64 only.** Windows is not supported.
+- **Semantic search is unavailable** in the Homebrew distribution.
 - **One language per repo** — detected by extension plurality across git-tracked files; override with `--language`.
 - **jarvis never edits code.** It is the retrieval half — [Serena](https://github.com/oraios/serena) complements it for renames/refactors.
 - **Indexing is explicit** — run `jarvis index` (or `jarvis watch`) before querying.
@@ -196,9 +211,9 @@ jarvis watch /path/to/your/repo [--debounce 5.0]  # debounced auto-reindex on fi
 | Variable | Purpose |
 |----------|---------|
 | `JARVIS_DATA_DIR` | Override default `~/.jarvis` for all indexes and registry |
-| `JARVIS_EMBEDDING_QUERY_PREFIX` / `JARVIS_EMBEDDING_DOC_PREFIX` | Override embedding instruction prefixes (auto-detected for bge-m3, e5, nomic-embed) |
 
-`jarvis index --no-semantic` skips the vector stage even when the `semantic` extra is installed. The MCP `indexRepo` tool defaults to `--no-semantic` so an agent tool call never implicitly downloads embedding weights.
+The source-development semantic path has additional model-prefix overrides;
+they have no effect in the standalone distribution.
 </details>
 
 ## Documentation

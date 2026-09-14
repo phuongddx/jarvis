@@ -190,8 +190,8 @@ class SemanticStore:
             try:
                 import lancedb
             except ImportError as exc:
-                from jarvis.embeddings import SemanticExtraMissingError, _INSTALL_HINT
-                raise SemanticExtraMissingError(_INSTALL_HINT) from exc
+                from jarvis.embeddings import SemanticExtraMissingError, semantic_install_hint
+                raise SemanticExtraMissingError(semantic_install_hint()) from exc
             self._db_dir.mkdir(parents=True, exist_ok=True)
             self._db = lancedb.connect(str(self._db_dir))
         return self._db
