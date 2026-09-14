@@ -49,7 +49,7 @@ jobs:
             -C "$RUNNER_TEMP/extract"
           npm install --silent -g @sourcegraph/scip-python
           export NATIVE_SMOKE_EXTRA_PATH="$(dirname "$(command -v scip-python)")"
-          .native-release/project/bin/python scripts/native_smoke.py \
+          python3 scripts/native_smoke.py \
             --root "$RUNNER_TEMP/extract/jarvis" \
             --repo "$RUNNER_TEMP/mini_py_repo" \
             --data-dir "$RUNNER_TEMP/data" \
