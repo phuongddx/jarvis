@@ -13,7 +13,7 @@
 # abandoned Komodo Edit CodeIntel package. That distribution is still
 # installable at 0.4.0 and receives no further releases.)
 name = "jarvis-mcp"
-version = "0.10.0"
+version = "0.11.0"
 description = "Local-first code intelligence MCP server (SCIP navigation + Zoekt search)"
 readme = "README.md"
 license = "MIT"
