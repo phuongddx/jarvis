@@ -74,7 +74,7 @@ def test_release_upload_includes_only_release_archives():
 def test_homebrew_validation_smokes_the_installed_formula():
     job = workflow_job("validate-homebrew")
     assert "JARVIS_TAP: jarvis-intelligence/local" in job
-    assert "brew tap-new" in job
+    assert "brew tap-new --no-git" in job
     assert 'brew install --formula "$JARVIS_TAP/jarvis"' in job
     assert "brew install --formula ./jarvis.rb" not in job
     assert "actions/checkout@v4" in job

@@ -130,12 +130,15 @@ jobs:
       - name: Install and test formula
         run: |
           set -eu
-          brew tap-new "$JARVIS_TAP"
+          brew tap-new --no-git "$JARVIS_TAP"
           tap_dir="$(brew --repository "$JARVIS_TAP")"
+          git -C "$tap_dir" init -q
+          git -C "$tap_dir" config user.name "jarvis release bot"
+          git -C "$tap_dir" config user.email "noreply@jarvis-intelligence.dev"
           mkdir -p "$tap_dir/Formula"
           cp jarvis.rb "$tap_dir/Formula/jarvis.rb"
           git -C "$tap_dir" add Formula/jarvis.rb
-          git -C "$tap_dir" -c user.name "jarvis release bot" -c user.email "noreply@jarvis-intelligence.dev" commit -qm "jarvis formula"
+          git -C "$tap_dir" commit -qm "jarvis formula"
           brew install --formula "$JARVIS_TAP/jarvis"
           brew test --formula "$JARVIS_TAP/jarvis"
           prefix="$(brew --prefix jarvis)"
