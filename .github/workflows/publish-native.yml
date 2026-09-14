@@ -140,7 +140,7 @@ jobs:
           git -C "$tap_dir" add Formula/jarvis.rb
           git -C "$tap_dir" commit -qm "jarvis formula"
           brew install --formula "$JARVIS_TAP/jarvis"
-          brew test --formula "$JARVIS_TAP/jarvis"
+          brew test "$JARVIS_TAP/jarvis"
           prefix="$(brew --prefix jarvis)"
           test -x "$prefix/bin/jarvis"
           test -x "$prefix/bin/jarvis-server"

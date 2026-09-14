@@ -34,6 +34,8 @@ def test_render_contains_every_platform_url_and_checksum():
 def test_render_installs_both_names_and_ctags_shim():
     formula = generator.render("0.11.0", "v0.11.0", _checksums())
 
+    assert 'libexec.install Dir["libexec/*"]' in formula
+    assert 'Dir["jarvis/libexec/*"]' not in formula
     assert 'bin.install_symlink libexec/"jarvis" => "jarvis"' in formula
     assert 'bin.install_symlink libexec/"jarvis" => "jarvis-server"' in formula
     assert 'exec "#{ctags}" "$@"' in formula

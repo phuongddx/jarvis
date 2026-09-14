@@ -76,6 +76,8 @@ def test_homebrew_validation_smokes_the_installed_formula():
     assert "JARVIS_TAP: jarvis-intelligence/local" in job
     assert "brew tap-new --no-git" in job
     assert 'brew install --formula "$JARVIS_TAP/jarvis"' in job
+    assert 'brew test "$JARVIS_TAP/jarvis"' in job
+    assert 'brew test --formula' not in job
     assert "brew install --formula ./jarvis.rb" not in job
     assert "actions/checkout@v4" in job
     assert "actions/setup-node@v4" in job
