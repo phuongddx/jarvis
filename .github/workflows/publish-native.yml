@@ -111,6 +111,8 @@ jobs:
   validate-homebrew:
     needs: stage-release
     if: github.event_name == 'release'
+    env:
+      JARVIS_TAP: jarvis-intelligence/local
     strategy:
       fail-fast: true
       matrix:
@@ -128,8 +130,14 @@ jobs:
       - name: Install and test formula
         run: |
           set -eu
-          brew install --formula ./jarvis.rb
-          brew test --formula ./jarvis.rb
+          brew tap-new "$JARVIS_TAP"
+          tap_dir="$(brew --repository "$JARVIS_TAP")"
+          mkdir -p "$tap_dir/Formula"
+          cp jarvis.rb "$tap_dir/Formula/jarvis.rb"
+          git -C "$tap_dir" add Formula/jarvis.rb
+          git -C "$tap_dir" -c user.name "jarvis release bot" -c user.email "noreply@jarvis-intelligence.dev" commit -qm "jarvis formula"
+          brew install --formula "$JARVIS_TAP/jarvis"
+          brew test --formula "$JARVIS_TAP/jarvis"
           prefix="$(brew --prefix jarvis)"
           test -x "$prefix/bin/jarvis"
           test -x "$prefix/bin/jarvis-server"
@@ -164,7 +172,7 @@ jobs:
           prefix="$(brew --prefix jarvis)"
           rm "$prefix/libexec/_internal/native-bin/scip"
           test ! -e "$prefix/libexec/_internal/native-bin/scip"
-          brew reinstall --formula ./jarvis.rb
+          brew reinstall --formula "$JARVIS_TAP/jarvis"
           test -x "$prefix/libexec/_internal/native-bin/scip"
           NATIVE_SMOKE_EXTRA_PATH="$(dirname "$(command -v scip-python)")" \
             python3 scripts/native_smoke.py \
@@ -173,7 +181,7 @@ jobs:
               --data-dir "$RUNNER_TEMP/homebrew-reinstall-data" \
               --expected-version "$version"
       - name: Audit formula without blocking on custom-tap policy warnings
-        run: brew audit --formula ./jarvis.rb || true
+        run: brew audit --formula "$JARVIS_TAP/jarvis" || true
 
   publish-formula:
     needs: validate-homebrew

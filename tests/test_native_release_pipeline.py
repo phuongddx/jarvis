@@ -73,6 +73,10 @@ def test_release_upload_includes_only_release_archives():
 
 def test_homebrew_validation_smokes_the_installed_formula():
     job = workflow_job("validate-homebrew")
+    assert "JARVIS_TAP: jarvis-intelligence/local" in job
+    assert "brew tap-new" in job
+    assert 'brew install --formula "$JARVIS_TAP/jarvis"' in job
+    assert "brew install --formula ./jarvis.rb" not in job
     assert "actions/checkout@v4" in job
     assert "actions/setup-node@v4" in job
     assert "prefix=\"$(brew --prefix jarvis)\"" in job
@@ -80,7 +84,7 @@ def test_homebrew_validation_smokes_the_installed_formula():
     assert "--expected-version \"$version\"" in job
     assert "native-bin/universal-ctags" in job
     assert "rm \"$prefix/libexec/_internal/native-bin/scip\"" in job
-    assert "brew reinstall --formula ./jarvis.rb" in job
+    assert 'brew reinstall --formula "$JARVIS_TAP/jarvis"' in job
     assert job.count("scripts/native_smoke.py") == 2
 
 
