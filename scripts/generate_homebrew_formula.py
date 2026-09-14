@@ -95,7 +95,7 @@ class Jarvis < Formula
   end
 
   def install
-    libexec.install Dir["jarvis/libexec/*"]
+    libexec.install Dir["libexec/*"]
     bin.install_symlink libexec/"jarvis" => "jarvis"
     bin.install_symlink libexec/"jarvis" => "jarvis-server"
 
