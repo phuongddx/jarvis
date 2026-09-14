@@ -59,7 +59,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.platform }}
-          path: .native-release/release/*
+          path: .native-release/release/jarvis_*.tar.gz*
           if-no-files-found: error
 
   stage-release:
@@ -97,7 +97,7 @@ jobs:
               --title "jarvis ${version}" \
               --notes "Standalone jarvis ${version}."
           fi
-          gh release upload "v${version}" release/* --clobber \
+          gh release upload "v${version}" release/jarvis_*.tar.gz* --clobber \
             --repo jarvis-intelligence/homebrew-jarvis
           uv run python scripts/generate_homebrew_formula.py \
             --version "$version" --release-tag "v${version}" \
