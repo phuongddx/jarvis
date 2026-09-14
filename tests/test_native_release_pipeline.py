@@ -56,6 +56,21 @@ def test_workflow_smoke_runs_with_host_python():
     assert ".native-release/project/bin/python scripts/native_smoke.py" not in job
 
 
+def test_build_upload_includes_only_release_archives():
+    job = workflow_job("build")
+    assert "path: .native-release/release/jarvis_*.tar.gz*" in job
+    assert "\n          path: .native-release/release/*\n" not in job
+
+
+def test_release_upload_includes_only_release_archives():
+    job = workflow_job("stage-release")
+    assert (
+        'gh release upload "v${version}" release/jarvis_*.tar.gz* --clobber'
+        in job
+    )
+    assert 'gh release upload "v${version}" release/* --clobber' not in job
+
+
 def test_homebrew_validation_smokes_the_installed_formula():
     job = workflow_job("validate-homebrew")
     assert "actions/checkout@v4" in job
