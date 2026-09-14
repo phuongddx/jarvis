@@ -6,15 +6,21 @@ import argparse
 import hashlib
 import re
 import shutil
+import socket
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_REPO = "https://github.com/jarvis-intelligence/jarvis-index/releases/download"
 PLATFORM_RE = re.compile(r"^(darwin|linux)_(arm64|amd64)$")
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_BASE_SECONDS = 2.0
+TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
 def split_platform(platform: str) -> tuple[str, str]:
@@ -47,8 +53,22 @@ def asset_urls(platform: str) -> list[tuple[str, str, tuple[str, ...]]]:
 
 
 def download_to(url: str, destination: Path) -> None:
-    with urllib.request.urlopen(url, timeout=120) as response:
-        destination.write_bytes(response.read())
+    last_error: Exception
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                payload = response.read()
+                destination.write_bytes(payload)
+                return
+        except urllib.error.HTTPError as exc:
+            if exc.code not in TRANSIENT_HTTP_CODES:
+                raise
+            last_error = exc
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+            last_error = exc
+        if attempt + 1 == DOWNLOAD_ATTEMPTS:
+            raise last_error
+        time.sleep(DOWNLOAD_RETRY_BASE_SECONDS * (2**attempt))
 
 
 def fetch(platform: str, output: Path, only: str | None = None) -> None:

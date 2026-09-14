@@ -50,6 +50,12 @@ def test_workflow_supports_build_only_manual_dispatch():
         assert "github.event_name == 'release'" in workflow_job(job)
 
 
+def test_workflow_smoke_runs_with_host_python():
+    job = workflow_job("build")
+    assert "python3 scripts/native_smoke.py" in job
+    assert ".native-release/project/bin/python scripts/native_smoke.py" not in job
+
+
 def test_homebrew_validation_smokes_the_installed_formula():
     job = workflow_job("validate-homebrew")
     assert "actions/checkout@v4" in job
