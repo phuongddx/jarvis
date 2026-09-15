@@ -36,7 +36,9 @@ def semantic_install_hint() -> str:
     if runtime.is_frozen():
         return (
             "semantic search is not included in the Homebrew binary "
-            "distribution"
+            "distribution; to enable it, clone "
+            "https://github.com/phuongddx/jarvis and follow the "
+            "'Source-build semantic search' section of its README"
         )
     return _INSTALL_HINT
 
@@ -118,6 +120,14 @@ class EmbeddingModel:
                                               trust_remote_code=True)
             self._model.max_seq_length = MAX_SEQ_LENGTH
         return self._model
+
+    def preload(self) -> None:
+        """Download/load the model weights into the shared Hugging Face
+        cache (~4.3 GB for the default model, one time, shared across
+        repos). Used by `jarvis install-semantic` so the first index does
+        not pay the download cost. Raises whatever _load raises; callers
+        decide whether that is fatal."""
+        self._load()
 
     def _encode(self, texts: list[str]) -> list[list[float]]:
         model = self._load()

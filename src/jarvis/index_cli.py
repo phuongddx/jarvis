@@ -799,13 +799,74 @@ def _semantic_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _sync_semantic_extra(project_root: Path) -> bool:
+    """Run the locked `uv sync` for the semantic extra. True only when
+    the sync exits 0 and both semantic imports resolve afterwards."""
+    uv = shutil.which("uv")
+    if uv is None:
+        print("semantic support installation requires uv", file=sys.stderr)
+        return False
+    print("installing semantic support...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            [uv, "sync", "--extra", "semantic", "--extra", "watch", "--group", "native"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=600,
+        )
+    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError):
+        print("semantic support installation failed", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print("semantic support installation failed", file=sys.stderr)
+        if result.stderr:
+            print(result.stderr.rstrip(), file=sys.stderr)
+        return False
+    importlib.invalidate_caches()
+    if _semantic_extra_missing():
+        print(
+            "semantic support installation completed but lancedb or "
+            "sentence_transformers is unavailable",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _preload_embedding_model() -> bool:
+    """Warm the Hugging Face cache for the configured embedding model
+    (~4.3 GB for the default, one time, shared across repos). Non-fatal
+    by design: dependencies are already installed, and the next index
+    retries missing weights through SentenceTransformer."""
+    print(
+        "downloading embedding model (one time, ~4.3 GB, shared across repos)...",
+        file=sys.stderr,
+    )
+    try:
+        from jarvis.embeddings import EmbeddingModel
+        EmbeddingModel().preload()
+    except Exception as exc:
+        print(
+            f"warning: embedding model download failed ({exc}); dependencies "
+            "are installed and the model will download on the next index",
+            file=sys.stderr,
+        )
+        return False
+    print("embedding model ready")
+    return True
+
+
 def _cmd_install_semantic(args: argparse.Namespace) -> int:
-    """Prepare semantic dependencies in a source checkout without shell work."""
+    """Install semantic dependencies and pre-download the model in a
+    source checkout without shell work."""
     del args
     if runtime.is_frozen():
         print(
             "semantic support is not installable — the Homebrew binary "
-            "distribution excludes semantic dependencies",
+            "distribution excludes semantic dependencies; use a source "
+            "checkout (see the README's Source-build semantic search section)",
             file=sys.stderr,
         )
         return 1
@@ -819,45 +880,15 @@ def _cmd_install_semantic(args: argparse.Namespace) -> int:
         )
         return 1
 
-    if not _semantic_extra_missing():
-        print("semantic support already installed")
-        return 0
-
-    uv = shutil.which("uv")
-    if uv is None:
-        print("semantic support installation requires uv", file=sys.stderr)
-        return 1
-
-    print("installing semantic support...", file=sys.stderr)
-    try:
-        result = subprocess.run(
-            [uv, "sync", "--extra", "semantic", "--extra", "watch", "--group", "native"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=600,
-        )
-    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError):
-        print("semantic support installation failed", file=sys.stderr)
-        return 1
-
-    if result.returncode != 0:
-        print("semantic support installation failed", file=sys.stderr)
-        if result.stderr:
-            print(result.stderr.rstrip(), file=sys.stderr)
-        return 1
-
-    importlib.invalidate_caches()
     if _semantic_extra_missing():
-        print(
-            "semantic support installation completed but lancedb or "
-            "sentence_transformers is unavailable",
-            file=sys.stderr,
-        )
-        return 1
+        if not _sync_semantic_extra(project_root):
+            return 1
+        print("semantic support installed")
+    else:
+        # Deps present does not imply weights cached — verify the model too.
+        print("semantic support already installed")
 
-    print("semantic support installed")
+    _preload_embedding_model()
     return 0
 
 

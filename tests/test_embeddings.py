@@ -206,3 +206,12 @@ def test_count_oversized_measures_the_prefixed_text(monkeypatch):
     # Body alone is under the cap; body + 20-char prefix goes over it.
     body = "a" * (embeddings.MAX_SEQ_LENGTH - 10)
     assert model.count_oversized([body]) == 1
+
+
+def test_preload_loads_model_through_pinned_revision(monkeypatch):
+    holder = _install_fake(monkeypatch)
+    model = EmbeddingModel()
+    model.preload()
+    assert holder["model"] is model._model
+    assert holder["model"].model_name == "BAAI/bge-m3"
+    assert holder["model"].revision == embeddings.DEFAULT_REVISION
