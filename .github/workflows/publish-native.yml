@@ -25,8 +25,8 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       - name: Build one checked native archive
@@ -56,7 +56,7 @@ jobs:
             --expected-version "$version"
         env:
           PLATFORM: ${{ matrix.platform }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-${{ matrix.platform }}
           path: .native-release/release/jarvis_*.tar.gz*
@@ -67,9 +67,9 @@ jobs:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: native-*
           merge-multiple: true
@@ -102,7 +102,7 @@ jobs:
           uv run python scripts/generate_homebrew_formula.py \
             --version "$version" --release-tag "v${version}" \
             --checksum-dir release > jarvis.rb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: homebrew-formula
           path: jarvis.rb
@@ -119,11 +119,11 @@ jobs:
         os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: homebrew-formula
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
       - uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9 # 2026.09.13.1
@@ -183,15 +183,15 @@ jobs:
               --repo "$RUNNER_TEMP/mini_py_repo" \
               --data-dir "$RUNNER_TEMP/homebrew-reinstall-data" \
               --expected-version "$version"
-      - name: Audit formula without blocking on custom-tap policy warnings
-        run: brew audit --formula "$JARVIS_TAP/jarvis" || true
+      - name: Audit formula
+        run: brew audit --formula "$JARVIS_TAP/jarvis"
 
   publish-formula:
     needs: validate-homebrew
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: homebrew-formula
           path: formula

@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status: EXECUTED — historical record.** This plan shipped `v0.11.0` on 2026-09-14. Do not execute its release, tag, tap-creation, or token steps again. The unchecked boxes are a historical artifact of the ledger workflow, not pending work. Read the post-execution audit below with the original steps.
+
 **Goal:** Create the missing public Homebrew tap, configure its scoped publish credential, release jarvis `0.11.0` through `publish-native.yml`, and verify `brew install jarvis-intelligence/jarvis/jarvis`.
 
 **Architecture:** Use the already-merged native release pipeline unchanged. Create and seed `jarvis-intelligence/homebrew-jarvis`, provide a repository-scoped token, validate the four native builds by manual dispatch, then publish a GPG-signed `v0.11.0` release. The existing release workflow uploads eight checksummed artifacts, renders the formula, validates real Homebrew installs on four runners, and commits the generated formula.
@@ -13,6 +15,41 @@
 ## Scope Check
 
 This is one operational release-enablement plan, not a packaging redesign. The native packaging code is already merged. This plan only supplies its missing external tap/credential prerequisites and ships `0.11.0`.
+
+## Post-Execution Audit — 2026-09-15
+
+### Execution result
+
+- Source tag and release: `v0.11.0`.
+- Source release commit: `fefc47f` (`fefc47fb9d945e42478ee703f45bf4ea36b5b80e`).
+- Successful release workflow: `34878937825`.
+- Public tap: `jarvis-intelligence/homebrew-jarvis`.
+- Formula-publishing tap commit: `0e961899` (`0e961899576435cb3d52608ad1c9e08c645792ac`).
+- Local Homebrew installation: `jarvis 0.11.0`; `brew test jarvis` passes.
+- Both `jarvis` and `jarvis-server` resolve to the active Homebrew prefix after the legacy uv `jarvis-mcp` tool was removed with explicit user approval.
+
+### Corrections discovered during execution
+
+- The original statement that the release workflow was unchanged was false. Execution required hardening PRs #57–#63:
+  - #57 stabilized native release validation, including host-python smoke execution and retry behavior.
+  - #58 prepared `0.11.0`.
+  - #59 fixed release-asset globs and prevented the staged `jarvis/` directory from being uploaded.
+  - #60 pinned `Homebrew/actions/setup-homebrew`.
+  - #61 moved Homebrew validation to a deterministic local tap.
+  - #62 initialized the local validation tap with a safe Git identity.
+  - #63 fixed the stripped formula install/layout.
+- The Linux post-build smoke now uses the runner's host `python3`, not the removed packaged interpreter.
+- Native archive downloads retry transient HTTP and network failures.
+- Artifact and release-upload globs are `jarvis_*.tar.gz*`, not all release-directory files.
+- The correct current Homebrew CLI is `brew test jarvis`; `brew test --formula jarvis` is invalid on Homebrew 7.0.1. The later `brew test "$JARVIS_TAP/jarvis"` form used by the workflow is also correct.
+- The old artifact probe allowed a jq result of `false` to pass because it checked command exit status rather than the boolean value. Current checks must compare the jq result explicitly to `true`.
+- The original plan did not include removal of the obsolete uv `jarvis-mcp` tool or alignment of the separately versioned Codex/Claude/Cursor plugin.
+- During release, the user explicitly directed use of the existing broad GitHub CLI token for `JARVIS_TAP_TOKEN`. This succeeded but is not the desired final state: replace it with a fine-grained PAT scoped only to `jarvis-intelligence/homebrew-jarvis`, with Contents read/write and Metadata read. Do not print or persist the token.
+- The formula currently passes functional validation but still produces audit warnings for redundant `version`, DSL ordering, `Formula["universal-ctags"]`, and `0o755`. The release workflow currently masks `brew audit` with `|| true`.
+
+### Follow-up
+
+The successor plan is [`2026-09-15-homebrew-release-hardening-and-plugin-alignment.md`](2026-09-15-homebrew-release-hardening-and-plugin-alignment.md).
 
 ## Global Constraints
 

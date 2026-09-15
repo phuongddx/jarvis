@@ -24,11 +24,14 @@ def test_render_contains_every_platform_url_and_checksum():
     checksums = _checksums()
     formula = generator.render("0.11.0", "v0.11.0", checksums)
 
-    assert 'version "0.11.0"' in formula
+    assert 'version "' not in formula
     assert 'depends_on "universal-ctags"' in formula
     for platform, digest in checksums.items():
-        assert f"jarvis_0.11.0_{platform}.tar.gz" in formula
-        assert digest in formula
+        url = (
+            "https://github.com/jarvis-intelligence/homebrew-jarvis"
+            f"/releases/download/v0.11.0/jarvis_0.11.0_{platform}.tar.gz"
+        )
+        assert f'url "{url}"\n      sha256 "{digest}"' in formula
 
 
 def test_render_installs_both_names_and_ctags_shim():
@@ -38,7 +41,11 @@ def test_render_installs_both_names_and_ctags_shim():
     assert 'Dir["jarvis/libexec/*"]' not in formula
     assert 'bin.install_symlink libexec/"jarvis" => "jarvis"' in formula
     assert 'bin.install_symlink libexec/"jarvis" => "jarvis-server"' in formula
+    assert 'formula_opt_bin("universal-ctags")/"ctags"' in formula
+    assert 'Formula["universal-ctags"]' not in formula
     assert 'exec "#{ctags}" "$@"' in formula
+    assert "chmod 0755, libexec/" in formula
+    assert "0o755" not in formula
     assert 'shell_output("#{bin}/jarvis --version")' in formula
     assert "{{ctags}}" not in formula
     assert "{{bin}}" not in formula
