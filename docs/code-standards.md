@@ -366,9 +366,12 @@ jarvis index <path> [--slug name] [--scheme name] [--language name] [--semantic-
 jarvis list
 jarvis status <slug>
 jarvis reindex <slug> [--scip | --no-scip]
+jarvis install-semantic
 jarvis forget <slug>
 jarvis watch <path> [--slug name] [--scheme name] [--language name] [--semantic-include path] [--debounce 5] [--scip | --no-scip]
 ```
+
+`jarvis install-semantic` is source-only; it runs the canonical uv extras sync and refuses in the frozen Homebrew distribution.
 
 ### Error Handling
 
@@ -443,6 +446,7 @@ jarvis index <path> [--slug name] [--scheme name] [--language name] [--semantic-
 jarvis list
 jarvis status <slug>
 jarvis reindex <slug>
+jarvis install-semantic
 jarvis forget <slug>
 jarvis watch <path> [--slug name] [--scheme name] [--language name] [--semantic-include path] [--debounce 5]
 ```

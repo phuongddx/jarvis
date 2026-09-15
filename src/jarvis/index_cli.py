@@ -3,7 +3,7 @@ baseline -> optionally enrich with SCIP -> zoekt-git-index -> optional
 semantic stage -> revalidate + graph edges -> atomic pointer swap ->
 registry record -> retire superseded snapshots (spec TSI-04 §5 order).
 
-Subcommands: index, list, status, reindex, forget, watch.
+Subcommands: index, list, status, reindex, forget, install-semantic, watch.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 import contextlib
+import importlib
 import importlib.util
 import json
 import os
@@ -791,6 +792,73 @@ def _install_semantic_extra() -> bool:
         # the caller's contract is one stderr warning and rc 0.
         return False
     return result.returncode == 0
+
+
+def _semantic_project_root() -> Path:
+    """Return the checkout that owns this source-build CLI."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _cmd_install_semantic(args: argparse.Namespace) -> int:
+    """Prepare semantic dependencies in a source checkout without shell work."""
+    del args
+    if runtime.is_frozen():
+        print(
+            "semantic support is not installable — the Homebrew binary "
+            "distribution excludes semantic dependencies",
+            file=sys.stderr,
+        )
+        return 1
+
+    project_root = _semantic_project_root()
+    if not (project_root / "pyproject.toml").is_file():
+        print(
+            "semantic support installation requires a jarvis source checkout "
+            f"(missing {project_root / 'pyproject.toml'})",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not _semantic_extra_missing():
+        print("semantic support already installed")
+        return 0
+
+    uv = shutil.which("uv")
+    if uv is None:
+        print("semantic support installation requires uv", file=sys.stderr)
+        return 1
+
+    print("installing semantic support...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            [uv, "sync", "--extra", "semantic", "--extra", "watch", "--group", "native"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=600,
+        )
+    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError):
+        print("semantic support installation failed", file=sys.stderr)
+        return 1
+
+    if result.returncode != 0:
+        print("semantic support installation failed", file=sys.stderr)
+        if result.stderr:
+            print(result.stderr.rstrip(), file=sys.stderr)
+        return 1
+
+    importlib.invalidate_caches()
+    if _semantic_extra_missing():
+        print(
+            "semantic support installation completed but lancedb or "
+            "sentence_transformers is unavailable",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("semantic support installed")
+    return 0
 
 
 def _prepare_semantic_stage(
@@ -2121,6 +2189,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_scip_flag(reindex_parser)
     _add_semantic_flag(reindex_parser)
     reindex_parser.set_defaults(func=_cmd_reindex)
+
+    install_semantic_parser = subparsers.add_parser(
+        "install-semantic",
+        help="install source-build semantic dependencies",
+    )
+    install_semantic_parser.set_defaults(func=_cmd_install_semantic)
 
     forget_parser = subparsers.add_parser("forget", help="remove a repo's registration and published index")
     forget_parser.add_argument("slug")
