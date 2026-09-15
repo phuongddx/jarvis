@@ -118,8 +118,9 @@ guidance.
 <summary>Not included</summary>
 
 `semanticSearch` is registered for MCP compatibility but is excluded from the
-standalone distribution. It returns a Homebrew-specific unavailability error;
-lexical search and symbol search remain available.
+standalone distribution. It returns a Homebrew-specific unavailability error
+that points to the source-build steps below; lexical search and symbol search
+remain available.
 </details>
 
 <details>
@@ -137,8 +138,10 @@ Then index explicitly:
 ```bash
 uv run jarvis index /path/to/repo --semantic
 ```
-
-The first embedding run downloads the configured model.
+`install-semantic` also pre-downloads the embedding model (`BAAI/bge-m3`,
+~4.3 GB, one time) into the shared Hugging Face cache
+(`~/.cache/huggingface/`); every indexed repo reuses it. If the download is
+interrupted, the next `jarvis index` retries it automatically.
 </details>
 
 ## MCP tools
