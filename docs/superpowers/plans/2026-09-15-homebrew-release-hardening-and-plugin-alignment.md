@@ -328,7 +328,7 @@ Expected: the audit test FAIL because the workflow contains `|| true`; the pinni
 Use this complete mapping and preserve each action's existing inputs and comments:
 
 ```text
-actions/checkout@v4                       -> actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.4.0
+actions/checkout@v4                       -> actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 actions/setup-node@v4                     -> actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
 actions/upload-artifact@v4                -> actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
 actions/download-artifact@v4              -> actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -880,7 +880,7 @@ git status --short
 git log --oneline --reverse origin/main..HEAD
 ```
 
-Expected: the worktree is clean except pre-existing unrelated untracked planning files, and the log contains exactly the Task 4 launcher commit and Task 5 documentation commit.
+Expected: the worktree is clean except pre-existing unrelated untracked planning files, and the log contains exactly the four authorized plugin commits: `f4799a1` launcher, `45c3886` Homebrew docs, `678a85a` legacy semantic launcher removal, and `adc34f6` Homebrew feature-limit clarification.
 
 - [ ] **Step 2: Push and create the plugin PR**
 
@@ -966,10 +966,13 @@ Expected: signing and signature verification succeed, the tag pushes, and a publ
 ```bash
 cd /Users/ddphuong/Projects/jarvis-ai/jarvis-index
 node scripts/check-manifests.mjs
-CHECK_PLUGIN_RELEASE=1 node scripts/check-plugin.mjs --release
+PLUGIN_RELEASE_OUTPUT="$(CHECK_PLUGIN_RELEASE=1 node scripts/check-plugin.mjs --release)"
+printf '%s\n' "$PLUGIN_RELEASE_OUTPUT"
+printf '%s\n' "$PLUGIN_RELEASE_OUTPUT" | grep -F 'P2b (' >/dev/null
+printf '%s\n' "$PLUGIN_RELEASE_OUTPUT" | grep -F 'tag present on origin' >/dev/null
 ```
 
-Expected: both checks exit 0. The release checker reports P2b URLs pinned at `v0.11.0` and confirms that tag exists on `origin`.
+Expected: both checks exit 0. The captured release-checker output contains both `P2b (` and `tag present on origin`; a skipped P2b fails the release verification.
 
 - [ ] **Step 6: Verify the installed Homebrew MCP entrypoint**
 
