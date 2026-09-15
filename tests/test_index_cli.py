@@ -4474,3 +4474,218 @@ def test_frozen_semantic_install_hint_never_mentions_uv(monkeypatch):
     assert "uv" not in frozen_hint
     monkeypatch.setattr(runtime, "is_frozen", lambda: False)
     assert "uv" in semantic_install_hint()
+
+
+def test_install_semantic_command_parses_without_arguments():
+    from jarvis import index_cli
+
+    parser = index_cli.build_parser()
+    args = parser.parse_args(["install-semantic"])
+
+    assert args.func is index_cli._cmd_install_semantic
+
+
+def test_install_semantic_refuses_frozen_build(monkeypatch, capsys):
+    import argparse
+
+    from jarvis import index_cli
+
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: True)
+
+    def forbidden():
+        raise AssertionError("a frozen build must never install semantic support")
+
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", forbidden)
+    monkeypatch.setattr(index_cli.shutil, "which", forbidden)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert captured.out == ""
+    assert "Homebrew binary distribution" in captured.err
+
+
+def test_install_semantic_reports_already_installed(monkeypatch, capsys):
+    import argparse
+
+    from jarvis import index_cli
+
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: False)
+
+    def forbidden():
+        raise AssertionError("installed support must not trigger another sync")
+
+    monkeypatch.setattr(index_cli.shutil, "which", forbidden)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert captured.out == "semantic support already installed\n"
+    assert captured.err == ""
+
+
+def test_install_semantic_reports_missing_source_checkout(monkeypatch, capsys, tmp_path):
+    import argparse
+
+    from jarvis import index_cli
+
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_project_root", lambda: tmp_path)
+
+    def forbidden():
+        raise AssertionError("a non-checkout must never invoke uv")
+
+    monkeypatch.setattr(index_cli.shutil, "which", forbidden)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "source checkout" in captured.err
+
+
+def test_install_semantic_reports_missing_uv(monkeypatch, capsys, tmp_path):
+    import argparse
+
+    from jarvis import index_cli
+
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_project_root", lambda: root)
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: True)
+    monkeypatch.setattr(index_cli.shutil, "which", lambda name: None)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "requires uv" in captured.err
+
+
+def test_install_semantic_runs_locked_sync(monkeypatch, capsys, tmp_path):
+    import argparse
+    import subprocess as subprocess_module
+
+    from jarvis import index_cli
+
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+    uv_path = "/fake/uv"
+    sync_options = {
+        "capture_output": True,
+        "text": True,
+        "errors": "replace",
+    }
+    calls: list[tuple[list[str], Path, int, dict[str, bool | str]]] = []
+    invalidations: list[int] = []
+    semantic_missing = True
+
+    def fake_run(cmd, *, cwd, timeout, capture_output, text, errors):
+        nonlocal semantic_missing
+        semantic_missing = False
+        calls.append(
+            (
+                cmd,
+                cwd,
+                timeout,
+                {
+                    "capture_output": capture_output,
+                    "text": text,
+                    "errors": errors,
+                },
+            )
+        )
+        return subprocess_module.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_project_root", lambda: root)
+    monkeypatch.setattr(index_cli.shutil, "which", lambda name: uv_path)
+    monkeypatch.setattr(index_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        index_cli, "_semantic_extra_missing", lambda: semantic_missing
+    )
+    monkeypatch.setattr("importlib.invalidate_caches", lambda: invalidations.append(1))
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert calls == [
+        (
+            [uv_path, "sync", "--extra", "semantic", "--extra", "watch", "--group", "native"],
+            root,
+            600,
+            sync_options,
+        )
+    ]
+    assert invalidations == [1]
+    assert captured.out == "semantic support installed\n"
+    assert captured.err == "installing semantic support...\n"
+
+
+def test_install_semantic_reports_sync_failure(monkeypatch, capsys, tmp_path):
+    import argparse
+    import subprocess as subprocess_module
+
+    from jarvis import index_cli
+
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+
+    def fake_run(cmd, *, cwd, timeout, capture_output, text, errors):
+        return subprocess_module.CompletedProcess(
+            cmd, 1, stdout="sync failed", stderr="network unavailable"
+        )
+
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_project_root", lambda: root)
+    monkeypatch.setattr(index_cli.shutil, "which", lambda name: "/fake/uv")
+    monkeypatch.setattr(index_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: True)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "semantic support installation failed" in captured.err
+    assert "network unavailable" in captured.err
+
+
+def test_install_semantic_reports_imports_unavailable_after_sync(
+    monkeypatch, capsys, tmp_path
+):
+    import argparse
+    import subprocess as subprocess_module
+
+    from jarvis import index_cli
+
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_project_root", lambda: root)
+    monkeypatch.setattr(index_cli.shutil, "which", lambda name: "/fake/uv")
+
+    def fake_run(cmd, *, cwd, timeout, capture_output, text, errors):
+        return subprocess_module.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        index_cli.subprocess,
+        "run",
+        fake_run,
+    )
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: True)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "lancedb" in captured.err
+    assert "sentence_transformers" in captured.err
