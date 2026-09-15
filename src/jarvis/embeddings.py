@@ -36,7 +36,9 @@ def semantic_install_hint() -> str:
     if runtime.is_frozen():
         return (
             "semantic search is not included in the Homebrew binary "
-            "distribution"
+            "distribution; to enable it, clone "
+            "https://github.com/phuongddx/jarvis and follow the "
+            "'Source-build semantic search' section of its README"
         )
     return _INSTALL_HINT
 

@@ -4472,6 +4472,8 @@ def test_frozen_semantic_install_hint_never_mentions_uv(monkeypatch):
     frozen_hint = semantic_install_hint()
     assert "Homebrew binary distribution" in frozen_hint
     assert "uv" not in frozen_hint
+    assert "github.com/phuongddx/jarvis" in frozen_hint
+    assert "Source-build semantic search" in frozen_hint
     monkeypatch.setattr(runtime, "is_frozen", lambda: False)
     assert "uv" in semantic_install_hint()
 
