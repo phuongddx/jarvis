@@ -4514,6 +4514,14 @@ def test_install_semantic_reports_already_installed(monkeypatch, capsys):
     monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
     monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: False)
 
+    preload_calls: list[int] = []
+
+    class _FakeModel:
+        def preload(self):
+            preload_calls.append(1)
+
+    monkeypatch.setattr("jarvis.embeddings.EmbeddingModel", _FakeModel)
+
     def forbidden():
         raise AssertionError("installed support must not trigger another sync")
 
@@ -4523,8 +4531,11 @@ def test_install_semantic_reports_already_installed(monkeypatch, capsys):
     captured = capsys.readouterr()
 
     assert rc == 0
-    assert captured.out == "semantic support already installed\n"
-    assert captured.err == ""
+    assert captured.out == (
+        "semantic support already installed\nembedding model ready\n"
+    )
+    assert "downloading embedding model" in captured.err
+    assert preload_calls == [1]
 
 
 def test_install_semantic_reports_missing_source_checkout(monkeypatch, capsys, tmp_path):
@@ -4611,6 +4622,13 @@ def test_install_semantic_runs_locked_sync(monkeypatch, capsys, tmp_path):
         index_cli, "_semantic_extra_missing", lambda: semantic_missing
     )
     monkeypatch.setattr("importlib.invalidate_caches", lambda: invalidations.append(1))
+    preload_calls: list[int] = []
+
+    class _FakeModel:
+        def preload(self):
+            preload_calls.append(1)
+
+    monkeypatch.setattr("jarvis.embeddings.EmbeddingModel", _FakeModel)
 
     rc = index_cli._cmd_install_semantic(argparse.Namespace())
     captured = capsys.readouterr()
@@ -4625,8 +4643,45 @@ def test_install_semantic_runs_locked_sync(monkeypatch, capsys, tmp_path):
         )
     ]
     assert invalidations == [1]
-    assert captured.out == "semantic support installed\n"
-    assert captured.err == "installing semantic support...\n"
+    assert preload_calls == [1]
+    assert captured.out == (
+        "semantic support installed\nembedding model ready\n"
+    )
+    assert captured.err.startswith("installing semantic support...\n")
+    assert "downloading embedding model" in captured.err
+
+
+def test_install_semantic_preload_failure_is_nonfatal(monkeypatch, capsys, tmp_path):
+    import argparse
+    import subprocess as subprocess_module
+
+    from jarvis import index_cli
+
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+
+    def fake_run(cmd, *, cwd, timeout, capture_output, text, errors):
+        return subprocess_module.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    class _BoomModel:
+        def preload(self):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(index_cli.runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(index_cli, "_semantic_project_root", lambda: root)
+    monkeypatch.setattr(index_cli.shutil, "which", lambda name: "/fake/uv")
+    monkeypatch.setattr(index_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: False)
+    monkeypatch.setattr("jarvis.embeddings.EmbeddingModel", _BoomModel)
+
+    rc = index_cli._cmd_install_semantic(argparse.Namespace())
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "warning: embedding model download failed (network down)" in captured.err
+    assert "will download on the next index" in captured.err
+    assert "embedding model ready" not in captured.out
 
 
 def test_install_semantic_reports_sync_failure(monkeypatch, capsys, tmp_path):
