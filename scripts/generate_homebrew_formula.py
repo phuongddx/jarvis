@@ -68,7 +68,6 @@ class Jarvis < Formula
   homepage "https://github.com/jarvis-intelligence/jarvis-index"
   url "{urls["darwin_arm64"]}"
   sha256 "{checksums["darwin_arm64"]}"
-  version "{version}"
 
   depends_on "universal-ctags"
 
@@ -99,12 +98,12 @@ class Jarvis < Formula
     bin.install_symlink libexec/"jarvis" => "jarvis"
     bin.install_symlink libexec/"jarvis" => "jarvis-server"
 
-    ctags = Formula["universal-ctags"].opt_bin/"ctags"
+    ctags = formula_opt_bin("universal-ctags")/"ctags"
     (libexec/"_internal/native-bin/universal-ctags").write <<~SH
       #!/bin/sh
       exec "#{{ctags}}" "$@"
     SH
-    chmod 0o755, libexec/"_internal/native-bin/universal-ctags"
+    chmod 0755, libexec/"_internal/native-bin/universal-ctags"
   end
 
   test do
