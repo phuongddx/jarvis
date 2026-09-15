@@ -79,8 +79,8 @@ def test_homebrew_validation_smokes_the_installed_formula():
     assert 'brew test "$JARVIS_TAP/jarvis"' in job
     assert 'brew test --formula' not in job
     assert "brew install --formula ./jarvis.rb" not in job
-    assert "actions/checkout@v4" in job
-    assert "actions/setup-node@v4" in job
+    assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in job
+    assert "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020" in job
     assert "prefix=\"$(brew --prefix jarvis)\"" in job
     assert "--root \"$prefix\"" in job
     assert "--expected-version \"$version\"" in job
@@ -88,6 +88,13 @@ def test_homebrew_validation_smokes_the_installed_formula():
     assert "rm \"$prefix/libexec/_internal/native-bin/scip\"" in job
     assert 'brew reinstall --formula "$JARVIS_TAP/jarvis"' in job
     assert job.count("scripts/native_smoke.py") == 2
+
+
+def test_homebrew_formula_audit_is_gating():
+    job = workflow_job("validate-homebrew")
+    assert "- name: Audit formula" in job
+    assert 'brew audit --formula "$JARVIS_TAP/jarvis"\n' in job
+    assert 'brew audit --formula "$JARVIS_TAP/jarvis" || true' not in job
 
 
 def test_unit_workflow_installs_native_packaging_dependencies():
