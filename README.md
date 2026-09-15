@@ -122,6 +122,25 @@ standalone distribution. It returns a Homebrew-specific unavailability error;
 lexical search and symbol search remain available.
 </details>
 
+<details>
+<summary>Source-build semantic search</summary>
+
+The standalone Homebrew package excludes semantic dependencies. In a source
+checkout, install them with:
+
+```bash
+uv run jarvis install-semantic
+```
+
+Then index explicitly:
+
+```bash
+uv run jarvis index /path/to/repo --semantic
+```
+
+The first embedding run downloads the configured model.
+</details>
+
 ## MCP tools
 
 | Tool | What it does |
