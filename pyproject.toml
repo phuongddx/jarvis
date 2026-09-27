@@ -102,10 +102,10 @@ native = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jarvis-intelligence/jarvis-index"
-Repository = "https://github.com/jarvis-intelligence/jarvis-index"
-Issues = "https://github.com/jarvis-intelligence/jarvis-index/issues"
-Changelog = "https://pypi.org/project/jarvis-mcp/#history"
+Homepage = "https://github.com/phuongddx/jarvis"
+Repository = "https://github.com/phuongddx/jarvis"
+Issues = "https://github.com/phuongddx/jarvis/issues"
+Changelog = "https://github.com/phuongddx/jarvis/blob/main/CHANGELOG.md"
 
 [project.scripts]
 jarvis = "jarvis.index_cli:main"
