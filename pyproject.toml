@@ -131,8 +131,8 @@ package-dir = { "" = "src" }
 packages = ["jarvis"]
 
 [tool.setuptools.package-data]
-# Dashboard SPA assets ride in every wheel; check_wheel_contents.py
-# guards their presence at release time.
+# Dashboard SPA assets ride in every wheel; scripts/check_native_package.py
+# guards their presence in the standalone release archive.
 jarvis = ["dashboard_assets/*.html", "dashboard_assets/*.js", "dashboard_assets/*.css"]
 
 [tool.pytest.ini_options]
