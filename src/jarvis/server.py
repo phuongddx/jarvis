@@ -462,7 +462,9 @@ def document_symbols(repo: str, path: str) -> dict[str, Any]:
 
 @mcp.tool(name="goToDefinition")
 def go_to_definition(repo: str, symbol: str) -> dict[str, Any]:
-    """Resolve `symbol`'s definition location(s) within `repo`. `symbol`
+    """Use instead of grep to find where a symbol is defined.
+
+    Resolve `symbol`'s definition location(s) within `repo`. `symbol`
     may be a bare name (`Greeter`), a qualified name (`Greeter.greet`), a
     full SCIP symbol string, or an opaque `syntax:` identifier returned by
     a prior call. A full SCIP identifier resolves only through SCIP; a
@@ -484,7 +486,10 @@ def go_to_definition(repo: str, symbol: str) -> dict[str, Any]:
 
 @mcp.tool(name="findReferences")
 def find_references(repo: str, symbol: str) -> dict[str, Any]:
-    """Every occurrence of `symbol` within `repo`, definition sites
+    """Use instead of grep to find every usage of a symbol, without matches
+    in comments, docs, or look-alike names.
+
+    Every occurrence of `symbol` within `repo`, definition sites
     included. `symbol` may be a bare name (`Greeter`), a qualified name
     (`Greeter.greet`), or a full SCIP symbol string. SCIP-only: requires
     real SCIP occurrence data and rejects an opaque `syntax:` identifier
@@ -506,7 +511,9 @@ def find_references(repo: str, symbol: str) -> dict[str, Any]:
 
 @mcp.tool(name="callHierarchy")
 def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
-    """Single-level incoming/outgoing call hierarchy for `symbol` within
+    """Use instead of grep to find what calls a function and what it calls.
+
+    Single-level incoming/outgoing call hierarchy for `symbol` within
     `repo`. `symbol` may be a bare name (`Greeter`), a qualified name
     (`Greeter.greet`), or a full SCIP symbol string. SCIP-only: requires
     real SCIP occurrence/enclosing-range data and rejects an opaque
@@ -528,7 +535,9 @@ def call_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
 
 @mcp.tool(name="typeHierarchy")
 def type_hierarchy(repo: str, symbol: str) -> dict[str, Any]:
-    """Single-level super/subtypes for `symbol` within `repo`. `symbol` may
+    """Use instead of grep to find a type's supertypes and subtypes.
+
+    Single-level super/subtypes for `symbol` within `repo`. `symbol` may
     be a bare name (`Greeter`), a qualified name (`Greeter.greet`), or a full
     SCIP symbol string. SCIP-only: requires real SCIP relationship data and
     rejects an opaque `syntax:` identifier with a capability error — type
@@ -590,7 +599,10 @@ def _indexing_fields(repo: str, indexed: bool) -> dict[str, Any]:
 
 @mcp.tool(name="getIndexStatus")
 def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
-    """Whether `repo` has a published index, and its freshness. Pass
+    """Call once before the first symbol query in a repo: shows whether it
+    is indexed, how fresh it is, and which tools are available.
+
+    Whether `repo` has a published index, and its freshness. Pass
     `repo_path` (the repo's local git working directory) to compare the
     published commit against `git rev-parse HEAD`; omitted, freshness is
     reported without a staleness comparison. `searchCoverage` reflects git

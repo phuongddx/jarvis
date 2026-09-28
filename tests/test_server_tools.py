@@ -1340,3 +1340,30 @@ def test_server_instructions_lead_with_the_rule_and_fit_client_caps():
     for needle in ("getIndexStatus", "findReferences", "grep"):
         assert needle in head
     assert len(server.SERVER_INSTRUCTIONS) <= 2048
+
+
+LEAD_SENTENCES = {
+    "getIndexStatus": (
+        "Call once before the first symbol query in a repo: shows whether it "
+        "is indexed, how fresh it is, and which tools are available."
+    ),
+    "goToDefinition": "Use instead of grep to find where a symbol is defined.",
+    "findReferences": (
+        "Use instead of grep to find every usage of a symbol, without matches "
+        "in comments, docs, or look-alike names."
+    ),
+    "callHierarchy": "Use instead of grep to find what calls a function and what it calls.",
+    "typeHierarchy": "Use instead of grep to find a type's supertypes and subtypes.",
+}
+
+
+@pytest.mark.anyio
+async def test_symbol_tool_descriptions_lead_with_when_to_use():
+    async with create_connected_server_and_client_session(server.mcp) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    for name, sentence in LEAD_SENTENCES.items():
+        description = " ".join((tools[name].description or "").split())
+        assert description.startswith(sentence), name
+    for name in EXPECTED_TOOLS - LEAD_SENTENCES.keys():
+        description = " ".join((tools[name].description or "").split())
+        assert not description.startswith("Use instead of grep"), name
