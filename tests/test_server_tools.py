@@ -1332,7 +1332,12 @@ async def test_index_repo_tool_is_registered():
 
 
 def test_server_instructions_are_published():
-    assert server.mcp.instructions == server.SERVER_INSTRUCTIONS
+    """Asserts on what the SDK actually sends at initialize time, not just
+    the module-level attribute: create_initialization_options() is the same
+    call create_connected_server_and_client_session/server.run() makes to
+    build the InitializeResult.instructions the client receives over MCP."""
+    options = server.mcp._mcp_server.create_initialization_options()
+    assert options.instructions == server.SERVER_INSTRUCTIONS
 
 
 def test_server_instructions_lead_with_the_rule_and_fit_client_caps():
@@ -1340,6 +1345,7 @@ def test_server_instructions_lead_with_the_rule_and_fit_client_caps():
     for needle in ("getIndexStatus", "findReferences", "grep"):
         assert needle in head
     assert len(server.SERVER_INSTRUCTIONS) <= 2048
+    assert server.SERVER_INSTRUCTIONS.index("\n\n") <= 512
 
 
 LEAD_SENTENCES = {
