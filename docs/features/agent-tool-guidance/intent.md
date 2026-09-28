@@ -33,9 +33,8 @@ outcomes. Every MCP client benefits, not only Claude Code.
 - Users: anyone running `jarvis-server` in an MCP client (Claude Code,
   Cursor, Codex, Claude Desktop).
 - Systems / repos: `jarvis` — `src/jarvis/server.py` (server
-  instructions, tool docstrings), `tests/test_server.py`, README "MCP
-  tools" if wording changes; eval harness reused from text2prod
-  `tests/code-intelligence/`.
+  instructions, tool docstrings), `tests/test_server_tools.py`; eval
+  harness reused from text2prod `tests/code-intelligence/`.
 
 ## Constraints
 

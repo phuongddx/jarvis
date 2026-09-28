@@ -1,0 +1,13 @@
+diff --git a/src/jarvis/query.py b/src/jarvis/query.py
+index edfc5a2..5c3a37e 100644
+--- a/src/jarvis/query.py
++++ b/src/jarvis/query.py
+@@ -542,7 +542,7 @@ def _syntax_candidates(conn: sqlite3.Connection, query: str) -> list[symbols.Can
+     dedup is ever needed."""
+     from jarvis import syntax_index
+ 
+-    matches = syntax_index.find_syntax_symbols(conn, query, uncovered_only=False)
++    matches = syntax_index.find_syntax_symbols(conn, query, uncovered_only=True)
+     return [
+         symbols.Candidate(
+             symbol=sym.symbol, dotted_path=sym.qualified_name, kind=sym.kind,

@@ -1,0 +1,3 @@
+1. NONE
+
+2. NOT VISIBLE. `mcp__jarvis__findReferences` is a deferred tool. All I can see is its name, which appears in the list of deferred tools that are available through ToolSearch. Its description and parameter schema aren't loaded, so I can't tell you what they say. To see them I'd have to call ToolSearch with `select:mcp__jarvis__findReferences`.
