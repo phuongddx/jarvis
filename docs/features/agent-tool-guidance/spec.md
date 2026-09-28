@@ -1,6 +1,7 @@
 # Spec: Agents choose jarvis tools over grep for symbol questions
 
-Status: approved <!-- draft | approved | shipped | superseded -->
+Status: shipped <!-- draft | approved | shipped | superseded -->
+Outcome: success criterion not met — instructions delivered verbatim, 0/5 sessions used jarvis symbol tools (see [eval-report.md](eval-report.md)). Shipped by owner decision: the text is accurate, has zero runtime cost, and reaches clients that read `instructions` and load full tool schemas. Changing Claude Code tool choice moves to B3 (jarvis-index hooks / schema loading).
 Date: 2026-09-28
 Intent: [intent.md](intent.md)
 
