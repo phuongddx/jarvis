@@ -59,8 +59,9 @@ outcomes. Every MCP client benefits, not only Claude Code.
   init), the modified server gets `getIndexStatus`, `findReferences`, or
   `callHierarchy` calls in at least 2 of 3 S1 runs and in the S2 run;
   the current server gets none; every outcome stays correct.
+- Placement: server instructions plus a leading sentence on the five
+  symbol and status tools (approach A in `spec.md`).
 
 ## Open questions
 
-- Should the guidance live only in server instructions, or also in every
-  tool docstring, or in a subset? (Decided when choosing an approach.)
+None.
