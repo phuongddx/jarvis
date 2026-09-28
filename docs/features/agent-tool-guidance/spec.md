@@ -1,6 +1,6 @@
 # Spec: Agents choose jarvis tools over grep for symbol questions
 
-Status: draft <!-- draft | approved | shipped | superseded -->
+Status: approved <!-- draft | approved | shipped | superseded -->
 Date: 2026-09-28
 Intent: [intent.md](intent.md)
 

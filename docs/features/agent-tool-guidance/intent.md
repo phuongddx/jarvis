@@ -1,7 +1,7 @@
 # Intent: Agents choose jarvis tools over grep for symbol questions
 
 Author: PhuongDoan
-Status: draft <!-- draft | accepted | rejected -->
+Status: accepted <!-- draft | accepted | rejected -->
 Date: 2026-09-28
 
 ## Problem
