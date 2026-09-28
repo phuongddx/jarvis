@@ -679,6 +679,23 @@ def test_python_indexer_env_set_with_malformed_pyproject(tmp_path: Path):
     assert env["PYTHONPATH"] == str((tmp_path / "src").resolve())
 
 
+def test_python_indexer_env_set_when_pyproject_tool_is_not_a_table(tmp_path: Path):
+    """A `tool` key that isn't a table (e.g. `tool = 5`) must not crash the
+    "pyright" in ... membership check -- that would escape as a bare
+    TypeError and crash the whole index run instead of degrading."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("tool = 5\n")
+
+    env = _python_indexer_env(tmp_path)
+
+    assert env is not None
+    assert env["PYTHONPATH"] == str((tmp_path / "src").resolve())
+
+
 def test_run_merges_env_over_os_environ(tmp_path: Path, monkeypatch):
     """env= must extend os.environ, not replace it — PATH must survive."""
     from jarvis.index_cli import _run

@@ -284,8 +284,9 @@ def _python_indexer_env(repo_path: Path) -> dict[str, str] | None:
     already has its own search-path configuration -- deferring to it beats
     guessing and possibly conflicting.
 
-    Appended to any existing PYTHONPATH rather than replacing it, same as
-    `_java_indexer_env` does for GRADLE_OPTS.
+    Prepended to any existing PYTHONPATH (highest precedence, so the repo's
+    own package under `src/` wins) rather than replacing it; existing
+    entries are preserved after it.
     """
     src = repo_path / "src"
     if not src.is_dir():
@@ -302,7 +303,8 @@ def _python_indexer_env(repo_path: Path) -> dict[str, str] | None:
                 data = tomllib.load(f)
         except (tomllib.TOMLDecodeError, OSError):
             data = {}
-        if "pyright" in data.get("tool", {}):
+        tool = data.get("tool")
+        if isinstance(tool, dict) and "pyright" in tool:
             return None
 
     resolved_src = str(src.resolve())
