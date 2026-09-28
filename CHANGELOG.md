@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- SCIP indexing of `src/`-layout Python repos now resolves imports from
+  files outside `src/` (tests, scripts), so `findReferences`/`callHierarchy`
+  include those call sites; note that SCIP symbol strings in such repos
+  change from `src.<pkg>...` to `<pkg>...` on reindex (bare/qualified-name
+  lookups unaffected).
+
 ## [0.11.0] - 2026-09-14
 
 ### Changed
