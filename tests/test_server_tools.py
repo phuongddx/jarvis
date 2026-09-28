@@ -1329,3 +1329,14 @@ async def test_index_repo_tool_is_registered():
     async with create_connected_server_and_client_session(server.mcp) as client:
         listed = {tool.name for tool in (await client.list_tools()).tools}
     assert listed == EXPECTED_TOOLS
+
+
+def test_server_instructions_are_published():
+    assert server.mcp.instructions == server.SERVER_INSTRUCTIONS
+
+
+def test_server_instructions_lead_with_the_rule_and_fit_client_caps():
+    head = server.SERVER_INSTRUCTIONS[:512]
+    for needle in ("getIndexStatus", "findReferences", "grep"):
+        assert needle in head
+    assert len(server.SERVER_INSTRUCTIONS) <= 2048

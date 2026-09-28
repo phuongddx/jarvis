@@ -26,7 +26,31 @@ from jarvis.registry import DEGRADED_STATUS, RegisteredRepo, origin_of, recovery
 from jarvis.search import ZoektLifecycle, search_zoekt, zoekt_repo_documents
 from jarvis.symbols import AmbiguousSymbolError
 
-mcp = FastMCP("jarvis")
+# Sent to every MCP client in the initialize result. The first paragraph is
+# the whole rule and must fit in 512 characters (Codex reads that much as
+# self-contained guidance); the total must stay under Claude Code's
+# 2,048-character cap. tests/test_server_tools.py enforces both.
+SERVER_INSTRUCTIONS = (
+    "jarvis answers symbol questions from a precomputed index, more "
+    "precisely than grep. In an indexed repo, for where X is defined, who "
+    "uses or calls X, or what subclasses X: call getIndexStatus first, then "
+    "goToDefinition, findReferences, callHierarchy, or typeHierarchy. "
+    "`repo` is the index slug: by default the repo directory's name "
+    "(lowercased, unsafe characters as `-`). Use grep or searchCode for "
+    "strings, config keys, and prose. Not indexed or a tool error: fall "
+    "back to grep and say so.\n\n"
+    "Limits: findReferences, callHierarchy, and typeHierarchy need SCIP "
+    "coverage; without it they return a capability error with recovery "
+    "steps, not an empty answer. A stale index can miss recent edits: pass "
+    "`repo_path` to getIndexStatus, and when it reports stale, confirm hits "
+    "in changed files. searchCode searches git HEAD, so uncommitted edits "
+    "are grep-only. documentSymbols outlines one file. blastRadius lists "
+    "other indexed repos that depend on a package. semanticSearch is "
+    "unavailable in the Homebrew build. indexRepo builds an index for a git "
+    "repo path."
+)
+
+mcp = FastMCP("jarvis", instructions=SERVER_INSTRUCTIONS)
 _query_service: QueryService | None = None
 _zoekt_lifecycle: ZoektLifecycle | None = None
 _graph_store: GraphStore | None = None
