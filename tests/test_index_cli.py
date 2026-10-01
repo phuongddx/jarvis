@@ -568,6 +568,134 @@ def test_java_indexer_env_omits_path_when_no_shim(tmp_path: Path, monkeypatch):
     assert "PATH" not in _java_indexer_env()
 
 
+def test_python_indexer_env_sets_pythonpath_for_src_layout(tmp_path: Path, monkeypatch):
+    """scip-python has no notion of a src/ layout on its own: files outside
+    src/ (tests, scripts) can't resolve `import <pkg>` unless src/ is put on
+    PYTHONPATH."""
+    from jarvis.index_cli import _python_indexer_env
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+
+    env = _python_indexer_env(tmp_path)
+
+    assert env == {"PYTHONPATH": str((tmp_path / "src").resolve())}
+
+
+def test_python_indexer_env_preserves_existing_pythonpath(tmp_path: Path, monkeypatch):
+    """Clobbering PYTHONPATH would silently break a user's own configuration,
+    the same concern _java_indexer_env has for GRADLE_OPTS."""
+    from jarvis.index_cli import _python_indexer_env
+
+    monkeypatch.setenv("PYTHONPATH", "/existing/path")
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+
+    env = _python_indexer_env(tmp_path)
+
+    expected = f"{(tmp_path / 'src').resolve()}{os.pathsep}/existing/path"
+    assert env["PYTHONPATH"] == expected
+
+
+def test_python_indexer_env_none_for_flat_layout(tmp_path: Path):
+    """No src/ directory at all: nothing to add to the search path."""
+    from jarvis.index_cli import _python_indexer_env
+
+    (tmp_path / "pkg.py").write_text("x = 1\n")
+
+    assert _python_indexer_env(tmp_path) is None
+
+
+def test_python_indexer_env_none_when_src_has_no_python_files(tmp_path: Path):
+    """A src/ directory that holds no .py files anywhere is not a src/
+    layout Python repo -- do not guess."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "data.txt").write_text("not python\n")
+
+    assert _python_indexer_env(tmp_path) is None
+
+
+def test_python_indexer_env_none_with_pyrightconfig(tmp_path: Path):
+    """A checked-in pyrightconfig.json is the user's own search-path
+    configuration -- defer to it rather than overriding with ours."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (tmp_path / "pyrightconfig.json").write_text("{}")
+
+    assert _python_indexer_env(tmp_path) is None
+
+
+def test_python_indexer_env_none_with_pyproject_pyright_table(tmp_path: Path):
+    """Same deferral, via pyproject.toml's [tool.pyright] table."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[tool.pyright]\nextraPaths = []\n")
+
+    assert _python_indexer_env(tmp_path) is None
+
+
+def test_python_indexer_env_set_with_pyproject_without_pyright_table(tmp_path: Path):
+    """A pyproject.toml that says nothing about pyright must not suppress
+    the PYTHONPATH fix."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[tool.other]\nfoo = 1\n")
+
+    env = _python_indexer_env(tmp_path)
+
+    assert env is not None
+    assert env["PYTHONPATH"] == str((tmp_path / "src").resolve())
+
+
+def test_python_indexer_env_set_with_malformed_pyproject(tmp_path: Path):
+    """A parse error must degrade to "no pyright config", not raise --
+    indexing must not crash over an unrelated syntax error in the user's
+    pyproject.toml."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("this is not valid toml [[[")
+
+    env = _python_indexer_env(tmp_path)
+
+    assert env is not None
+    assert env["PYTHONPATH"] == str((tmp_path / "src").resolve())
+
+
+def test_python_indexer_env_set_when_pyproject_tool_is_not_a_table(tmp_path: Path):
+    """A `tool` key that isn't a table (e.g. `tool = 5`) must not crash the
+    "pyright" in ... membership check -- that would escape as a bare
+    TypeError and crash the whole index run instead of degrading."""
+    from jarvis.index_cli import _python_indexer_env
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("tool = 5\n")
+
+    env = _python_indexer_env(tmp_path)
+
+    assert env is not None
+    assert env["PYTHONPATH"] == str((tmp_path / "src").resolve())
+
+
 def test_run_merges_env_over_os_environ(tmp_path: Path, monkeypatch):
     """env= must extend os.environ, not replace it — PATH must survive."""
     from jarvis.index_cli import _run
@@ -914,6 +1042,93 @@ def test_index_repo_non_swift_never_probes_scip_swift_version(tmp_path: Path, mo
     # through the pre-pipeline failure wrap's bare `raise` and fails here.
     with pytest.raises(cli.IndexingError, match="stop after the indexer"):
         cli.index_repo(tmp_path, slug="pure-py", root=tmp_path / "data")
+
+
+def test_index_repo_passes_python_indexer_env_to_scip_python_run(tmp_path: Path, monkeypatch):
+    """The scip-python `_run` invocation for a python repo must receive
+    `_python_indexer_env`'s result, so files outside src/ (tests, scripts)
+    can resolve `import <pkg>` (see _python_indexer_env)."""
+    import jarvis.index_cli as cli
+
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (src / "core.py").write_text("def helper():\n    return 1\n")
+    _init_git_repo(tmp_path)
+
+    monkeypatch.setattr(cli, "check_scip_version", lambda: None)
+
+    captured: dict = {}
+
+    def fake_run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            captured["env"] = env
+        raise cli.IndexingError("stop after the indexer command is built")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+
+    with pytest.raises(cli.IndexingError, match="stop after the indexer"):
+        cli.index_repo(tmp_path, slug="src-layout-py", root=tmp_path / "data")
+
+    assert captured["env"] == {"PYTHONPATH": str((tmp_path / "src").resolve())}
+
+
+_missing_python_src_layout = [b for b in ("scip-python", "scip") if shutil.which(b) is None]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    _missing_python_src_layout,
+    reason=f"missing required binaries: {_missing_python_src_layout}",
+)
+def test_scip_python_resolves_src_layout_imports_with_pythonpath_env(tmp_path: Path):
+    """End-to-end proof of the root cause and the fix: without src/ on
+    scip-python's search path, a src/-layout repo's out-of-src/ callers
+    (tests/) get file-local symbols for `import <pkg>` names, so the
+    definition's occurrence never gains a cross-file reference. Setting
+    PYTHONPATH=<repo>/src (via _python_indexer_env) fixes it."""
+    from jarvis.index_cli import _python_indexer_env
+
+    repo = tmp_path / "repo"
+    src = repo / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (src / "core.py").write_text("def helper():\n    return 1\n")
+    tests_dir = repo / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_core.py").write_text(
+        "from pkg.core import helper\n\n\ndef test_helper():\n    assert helper() == 1\n"
+    )
+    _init_git_repo(repo)
+
+    def _index(env: dict[str, str] | None, output_name: str) -> Path:
+        scip_path = tmp_path / output_name
+        merged = {**os.environ, **env} if env else dict(os.environ)
+        subprocess.run(
+            ["scip-python", "index", "--output", str(scip_path)],
+            cwd=repo, env=merged, check=True, capture_output=True, text=True,
+        )
+        return scip_path
+
+    def _has_resolved_helper_occurrence(scip_path: Path) -> bool:
+        result = subprocess.run(
+            ["scip", "print", "--json", str(scip_path)],
+            cwd=repo, check=True, capture_output=True, text=True,
+        )
+        data = json.loads(result.stdout)
+        for doc in data.get("documents", []):
+            if doc.get("relative_path") != "tests/test_core.py":
+                continue
+            for occ in doc.get("occurrences", []):
+                if occ.get("symbol", "").endswith("`pkg.core`/helper()."):
+                    return True
+        return False
+
+    with_scip = _index(_python_indexer_env(repo), "with.scip")
+    assert _has_resolved_helper_occurrence(with_scip)
+
+    without_scip = _index(None, "without.scip")
+    assert not _has_resolved_helper_occurrence(without_scip)
 
 
 def test_zoekt_index_cmd_uses_git_index_with_pinned_flags(tmp_path: Path):

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
@@ -264,6 +265,53 @@ def _java_indexer_env() -> dict[str, str]:
     if (shims / "bash").exists():
         env["PATH"] = f"{shims}{os.pathsep}{os.environ.get('PATH', '')}"
     return env
+
+
+def _python_indexer_env(repo_path: Path) -> dict[str, str] | None:
+    """scip-python resolves `import <pkg>` the way pyright does: relative to
+    its configured search path, which defaults to `repo_path` itself. In a
+    `src/`-layout repo that leaves every file OUTSIDE `src/` (tests/,
+    scripts/) unable to resolve imports of the package under `src/` -- scip
+    emits file-local symbols for those names instead of a symbol resolving
+    to the real definition, so `findReferences`/`callHierarchy` miss every
+    such call site.
+
+    Puts `<repo_path>/src` on PYTHONPATH when ALL hold: `src/` exists and
+    contains at least one `.py` file anywhere under it (a bounded check --
+    the first hit via `rglob` is enough, no need to walk the whole tree);
+    there is no checked-in `pyrightconfig.json`; and `pyproject.toml` either
+    is absent or has no `[tool.pyright]` table. Any of those means the repo
+    already has its own search-path configuration -- deferring to it beats
+    guessing and possibly conflicting.
+
+    Prepended to any existing PYTHONPATH (highest precedence, so the repo's
+    own package under `src/` wins) rather than replacing it; existing
+    entries are preserved after it.
+    """
+    src = repo_path / "src"
+    if not src.is_dir():
+        return None
+    if next(src.rglob("*.py"), None) is None:
+        return None
+    if (repo_path / "pyrightconfig.json").exists():
+        return None
+
+    pyproject = repo_path / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            with pyproject.open("rb") as f:
+                data = tomllib.load(f)
+        except (tomllib.TOMLDecodeError, OSError):
+            data = {}
+        tool = data.get("tool")
+        if isinstance(tool, dict) and "pyright" in tool:
+            return None
+
+    resolved_src = str(src.resolve())
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        return {"PYTHONPATH": f"{resolved_src}{os.pathsep}{existing}"}
+    return {"PYTHONPATH": resolved_src}
 
 
 def _git_tracked_files(repo_path: Path) -> list[str]:
@@ -1036,7 +1084,9 @@ def _attempt_scip(
     try:
         _run([*indexer_cmd, "--output", str(scip_path)], cwd=repo_path,
              step=f"{indexer_cmd[0]} index",
-             env=_java_indexer_env() if language == "java" else None)
+             env=_java_indexer_env() if language == "java"
+             else _python_indexer_env(repo_path) if language == "python"
+             else None)
         _run(
             ["scip", "expt-convert", "--output", str(db_path), str(scip_path)],
             cwd=repo_path,
