@@ -1,0 +1,10 @@
+Skill
+Bash:uv run pytest -m "not integration" tests/test_query.py -k test_resolve_definition_bare_name_prefers_the_scip_covered_file_over_syntax 2>&1 | tail -50
+Bash:grep -n "prefers_the_scip_covered_file_over_syntax" -A40 tests/test_query.py; grep -n "def _syntax_candidates\|def _genuine_scip_candidates" -A40 src/jarvis/query.py
+Bash:grep -n "def find_syntax_symbols" -A30 src/jarvis/syntax_index.py; grep -rn "uncovered_only" src tests
+Bash:sed -i '' 's/find_syntax_symbols(conn, query, uncovered_only=False)/find_syntax_symbols(conn, query, uncovered_only=True)/' src/jarvis/query.py && git diff && uv run pytest -m "not integration" -q 2>&1 | tail -5
+Bash:uv run pytest -m "not integration" -q --ignore=tests/test_packaging_spec.py 2>&1 | tail -5; git stash -q && uv run pytest -m "not integration" -q --ignore=tests/test_packaging_spec.py 2>&1 | tail -2; git stash pop -q
+Bash:uv run pytest -m "not integration" -q tests/test_query.py tests/test_syntax_index.py 2>&1 | tail -3
+ToolSearch
+Bash:until [ -s /private/tmp/claude-502/-private-tmp-claude-502--Users-ddphuong-Projects-text2prod-3049c210-24d5-462f-a9e2-ae777a348f49-scratchpad-b1-eval-b1-debug/f4bbc2c1-0100-4678-ac7f-9aed9e26f383/tasks/beiyj7w6y.output ] && [ $(grep -c " in [0-9.]*s" /private/tmp/claude-502/-private-tmp-claude-502--Users-ddphuong-Projects-text2prod-3049c210-24d5-462f-a9e2-ae777a348f49-scratchpad-b1-eval-b1-debug/f4bbc2c1-0100-4678-ac7f-9aed9e26f383/tasks/beiyj7w6y.output) -ge 2 ]; do sleep 5; done; sleep 2; cat /private/tmp/claude-502/-private-tmp-claude-502--Users-ddphuong-Projects-text2prod-3049c210-24d5-462f-a9e2-ae777a348f49-scratchpad-b1-eval-b1-debug/f4bbc2c1-0100-4678-ac7f-9aed9e26f383/tasks/beiyj7w6y.output; cd /private/tmp/claude-502/-Users-ddphuong-Projects-text2prod/3049c210-24d5-462f-a9e2-ae777a348f49/scratchpad/b1-eval/b1-debug && git stash list; git diff --stat
+Bash:uv run pytest -m "not integration" -q tests/test_query.py 2>&1 | tail -1

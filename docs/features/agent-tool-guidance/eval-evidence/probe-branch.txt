@@ -1,0 +1,10 @@
+**1.** The jarvis MCP server gave these instructions, quoted in full:
+
+> ## jarvis
+> jarvis answers symbol questions from a precomputed index, more precisely than grep. In an indexed repo, for where X is defined, who uses or calls X, or what subclasses X: call getIndexStatus first, then goToDefinition, findReferences, callHierarchy, or typeHierarchy. `repo` is the index slug: by default the repo directory's name (lowercased, unsafe characters as `-`). Use grep or searchCode for strings, config keys, and prose. Not indexed or a tool error: fall back to grep and say so.
+>
+> Limits: findReferences, callHierarchy, and typeHierarchy need SCIP coverage; without it they return a capability error with recovery steps, not an empty answer. A stale index can miss recent edits: pass `repo_path` to getIndexStatus, and when it reports stale, confirm hits in changed files. searchCode searches git HEAD, so uncommitted edits are grep-only. documentSymbols outlines one file. blastRadius lists other indexed repos that depend on a package. semanticSearch is unavailable in the Homebrew build. indexRepo builds an index for a git repo path.
+
+**2.** NOT VISIBLE
+
+`mcp__jarvis__findReferences` is a deferred tool. I can only see its name in the list of deferred tools. Its description and parameter schema only load after a ToolSearch call (for example `select:mcp__jarvis__findReferences`), and I haven't made one. The only other thing I know about it comes from the server instructions above: it answers "who uses or calls X," it needs SCIP coverage, and without that coverage it returns a capability error. None of that is the tool's own description or schema.

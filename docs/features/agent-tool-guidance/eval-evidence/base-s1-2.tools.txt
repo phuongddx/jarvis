@@ -1,0 +1,7 @@
+Skill
+Bash:uv run pytest -m "not integration" tests/test_query.py -k test_resolve_definition_bare_name_prefers_the_scip_covered_file_over_syntax 2>&1 | tail -50
+Bash:grep -n "test_resolve_definition_bare_name_prefers_the_scip_covered_file_over_syntax" -A40 tests/test_query.py; grep -n "def _syntax_candidates\|def _genuine_scip_candidates" -A40 src/jarvis/query.py
+Bash:grep -n "def find_syntax_symbols" -A40 src/jarvis/syntax_index.py; grep -rn "uncovered_only" src tests; git log --oneline -3
+Edit
+Bash:uv run pytest -m "not integration" tests/test_query.py 2>&1 | tail -3; uv run pytest -m "not integration" -q 2>&1 | tail -3
+Bash:uv run pytest -m "not integration" -q tests/test_packaging_spec.py 2>&1 | grep -E "Error|error" | head -5; git stash -q && uv run pytest -m "not integration" -q tests/test_packaging_spec.py 2>&1 | tail -2; git stash pop -q; uv run pytest -m "not integration" -q --ignore=tests/test_packaging_spec.py 2>&1 | tail -3
