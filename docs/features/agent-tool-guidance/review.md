@@ -46,3 +46,7 @@ and docs.
 The final reviewer's verdict: ready to merge with fixes, and those
 fixes are applied. The code is correct, accurate, and in scope. Merging
 against a failed success criterion (finding 4) is the owner's decision.
+
+## Promotion
+
+Approved by the owner: measured MCP client behavior added to `docs/engineering/infrastructure.md` ("MCP client behavior (measured)").
