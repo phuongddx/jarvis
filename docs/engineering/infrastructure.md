@@ -35,3 +35,12 @@ uv run jarvis-server
 ## Optional indexer bootstrap
 
 `setup.sh --only scip-swift|scip-typescript|scip-python|scip-java|bash-shim` can mutate home/shell state; isolate with `JARVIS_BIN_DIR` and `JARVIS_DATA_DIR`.
+
+## MCP client behavior (measured)
+
+From headless Claude Code evals on jarvis-repo snapshots (`docs/features/agent-tool-guidance/eval-report.md`):
+
+- Claude Code delivers `SERVER_INSTRUCTIONS` to the model verbatim. With tool search on (the default), it lists jarvis tools by name only; descriptions and schemas load after a `ToolSearch` call or when the server sets `alwaysLoad: true`.
+- No lever tried changed tool choice on tasks grep can answer: server instructions (0/5 sessions), `alwaysLoad` with visible schemas, a SessionStart nudge, and a non-blocking pre-grep hook reminder (0/9 between them).
+- Before the src-layout fix (PR #68), `findReferences`/`callHierarchy` missed calls from files outside `src/` in `src/`-layout repos (4/18 → 18/18 after). Agents that preferred grep were getting more complete answers.
+- Headless `--output-format stream-json` omits PreToolUse/PostToolUse hook events unless `--include-hook-events` is passed.
