@@ -21,3 +21,6 @@ demo/.jarvis/
 
 # Local native packaging outputs
 .native-release/
+
+# text2prod subagent-driven-development scratch (ledgers, briefs, review packages)
+.text2prod/
