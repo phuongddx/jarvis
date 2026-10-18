@@ -561,7 +561,7 @@ def _terminal_stage_fields(
 def _publish_metadata_payload(
     *, slug: str, sha: str, published_at: str, generation: str,
     source_hash: str, scip_mode: str, carried_from_sha: str | None,
-    carry_depth: int,
+    carry_depth: int, full_refresh_reason: str | None = None,
 ) -> dict:
     """Canonical stage-7 metadata payload, including SCIP provenance."""
     return {
@@ -575,6 +575,7 @@ def _publish_metadata_payload(
         "scip_mode": scip_mode,
         "carried_from_sha": carried_from_sha,
         "carry_depth": carry_depth,
+        "full_refresh_reason": full_refresh_reason,
     }
 
 
@@ -1604,6 +1605,7 @@ def _index_repo_locked(
             # -- Stage 3: optional SCIP enrichment -----------------------
             attempt: ScipAttempt | None = None
             carry_ctx: dict | None = None
+            full_refresh_reason: str | None = None
             if (watch and scip_enabled
                     and resolved_language in _INDEXER_BY_LANGUAGE
                     and not suppressed):
@@ -1635,6 +1637,13 @@ def _index_repo_locked(
                         # carry when the no-op guard could not fire.
                         decision = carry_mod.decide(
                             prev_meta, doc_count, len(changed), len(closure))
+                        if not decision.carry and decision.reason in (
+                                carry_mod.FULL_REFRESH_REASONS):
+                            # A rejected watch carry falls through to the
+                            # full attempt below; publish WHY with this
+                            # exact generation. `no-previous` stays null —
+                            # a first index is not a refresh decision.
+                            full_refresh_reason = decision.reason
                         if changed and decision.carry:
                             carried_db = scratch / "carried.db"
                             prev_origin = (prev_meta.carried_from_sha
@@ -1831,6 +1840,7 @@ def _index_repo_locked(
                         generation=generation, source_hash=manifest.source_hash,
                         scip_mode=scip_mode, carried_from_sha=carried_sha,
                         carry_depth=carry_depth,
+                        full_refresh_reason=full_refresh_reason,
                     )),
                     encoding="utf-8",
                 )

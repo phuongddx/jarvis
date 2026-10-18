@@ -107,6 +107,23 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
     )
 
 
+def _carried_document_count(conn: sqlite3.Connection) -> int:
+    """Count this snapshot's carried SCIP documents. Zero when the table is
+    absent (full generation / legacy snapshot) or unreadable — a status
+    probe must never raise, and the absence is honest "not carried"."""
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='carried_documents'"
+        ).fetchone()
+        if has_table is None:
+            return 0
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0])
+    except sqlite3.Error:
+        return 0
+
+
 def _carried_sha_map(conn: sqlite3.Connection) -> dict[int, str]:
     """document_id -> carried_from_sha from the sidecar; {} when absent."""
     has = conn.execute(
@@ -864,20 +881,29 @@ class QueryService:
         subtypes = _type_hierarchy_subtypes(conn, resolved, carried_shas)
         return resolved, supertypes, subtypes, freshness
 
-    def get_index_status(self, repo: str, repo_path: str | None = None) -> tuple[bool, FreshnessSnapshot]:
-        """`repo_path` (optional): a local git working directory to compare
-        the published commit against via `git rev-parse HEAD`. Omitted, the
-        published commit is reported without a staleness comparison (honest
-        "we know the commit, we haven't checked" freshness, never stale=True
-        without evidence)."""
+    def get_index_status_details(
+        self, repo: str, repo_path: str | None = None,
+    ) -> tuple[bool, FreshnessSnapshot, int, str | None]:
+        """One-snapshot status facts: `(indexed, freshness,
+        carriedDocumentCount, fullRefreshReason)`. Freshness and the carried
+        count come from the SAME cached snapshot connection, and the reason
+        comes from that snapshot's own metadata, so a concurrent atomic
+        publish can never mix generation N freshness with generation N+1
+        counts. `fullRefreshReason` is the raw metadata value; callers
+        constrain it to the spec enum."""
         try:
-            _, metadata = get_connection(self._cache, repo)
+            conn, metadata = get_connection(self._cache, repo)
         except IndexNotFoundError:
-            return False, _freshness_snapshot(None)
+            return False, _freshness_snapshot(None), 0, None
 
         snapshot = _freshness_snapshot(metadata)
+        carried_document_count = _carried_document_count(conn)
+        full_refresh_reason = (
+            metadata.full_refresh_reason if metadata is not None else None
+        )
+
         if repo_path is None or snapshot.commit is None:
-            return True, snapshot
+            return True, snapshot, carried_document_count, full_refresh_reason
 
         live_head = _git_head(repo_path)
         if live_head is None:
@@ -889,7 +915,7 @@ class QueryService:
                 checked_at=snapshot.checked_at,
                 generation=snapshot.generation,
                 scip_carried_from_sha=snapshot.scip_carried_from_sha,
-            )
+            ), carried_document_count, full_refresh_reason
 
         stale = snapshot.commit != live_head
         return True, FreshnessSnapshot(
@@ -900,4 +926,13 @@ class QueryService:
             checked_at=snapshot.checked_at,
             generation=snapshot.generation,
             scip_carried_from_sha=snapshot.scip_carried_from_sha,
-        )
+        ), carried_document_count, full_refresh_reason
+
+    def get_index_status(self, repo: str, repo_path: str | None = None) -> tuple[bool, FreshnessSnapshot]:
+        """`repo_path` (optional): a local git working directory to compare
+        the published commit against via `git rev-parse HEAD`. Omitted, the
+        published commit is reported without a staleness comparison (honest
+        "we know the commit, we haven't checked" freshness, never stale=True
+        without evidence)."""
+        indexed, snapshot, _, _ = self.get_index_status_details(repo, repo_path)
+        return indexed, snapshot

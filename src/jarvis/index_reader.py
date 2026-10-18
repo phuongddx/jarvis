@@ -62,6 +62,11 @@ class IndexMetadata:
     scip_mode: str | None = None
     carried_from_sha: str | None = None
     carry_depth: int = 0
+    # The watch-path carry decision that rejected the most recent full
+    # SCIP generation, when any (spec enum: not-carryable/depth-cap/
+    # threshold). Old writers never emit the key; a full index that was
+    # not a rejected carry, and any carried generation, leave it None.
+    full_refresh_reason: str | None = None
 
     @classmethod
     def from_json(cls, payload: dict) -> "IndexMetadata":
@@ -76,6 +81,7 @@ class IndexMetadata:
             scip_mode=payload.get("scip_mode"),
             carried_from_sha=payload.get("carried_from_sha"),
             carry_depth=int(payload.get("carry_depth") or 0),
+            full_refresh_reason=payload.get("full_refresh_reason"),
         )
 
 

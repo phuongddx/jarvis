@@ -436,7 +436,11 @@ def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
 
     class _CarriedStub:
-        def get_index_status(self, repo, repo_path=None):
+        def __init__(self):
+            self.carried_document_count = 0
+            self.full_refresh_reason = None
+
+        def get_index_status_details(self, repo, repo_path=None):
             return True, FreshnessSnapshot(
                 commit="abc123",
                 generated_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -444,7 +448,7 @@ def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
                 freshness=Freshness.FRESH,
                 checked_at=datetime.now(UTC),
                 scip_carried_from_sha="prev000",
-            )
+            ), self.carried_document_count, self.full_refresh_reason
 
     monkeypatch.setattr(server, "_query_service", _CarriedStub())
 
@@ -467,6 +471,129 @@ def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
     assert payload["carriedDocumentCount"] == 0  # no live SCIP db on disk
     assert payload["fullRefreshReason"] is None
 
+
+def test_get_index_status_full_run_reports_registry_mode_and_no_reason(
+    tmp_path: Path,
+):
+    """A full generation surfaces the registry's SCIP state as scipMode,
+    with null provenance and no full-refresh decision to describe."""
+    from jarvis.registry import Registry, ScipStageFields
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert(
+            REPO, "/p", "python", "abc123", "indexed",
+            scip_stage=ScipStageFields(state="available"),
+        )
+    finally:
+        registry.close()
+
+    payload = server.get_index_status(repo=REPO)
+
+    assert payload["scipMode"] == "available"
+    assert payload["carriedFromSha"] is None
+    assert payload["carryDepth"] == 0
+    assert payload["carriedDocumentCount"] == 0  # fixture has no sidecar table
+    assert payload["fullRefreshReason"] is None
+
+
+@pytest.mark.parametrize("reason", ["threshold", "depth-cap", "not-carryable"])
+def test_get_index_status_surfaces_persisted_full_refresh_reason(
+    tmp_path: Path, monkeypatch, reason: str,
+):
+    """The spec enum comes from the published generation's own metadata via
+    the one-snapshot status read — never from registry status_reason."""
+    from datetime import UTC, datetime
+
+    from jarvis.query import Freshness, FreshnessSnapshot
+    from jarvis.registry import Registry, ScipStageFields
+
+    class _FullStub:
+        def get_index_status_details(self, repo, repo_path=None):
+            return True, FreshnessSnapshot(
+                commit="abc123",
+                generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                stale=False,
+                freshness=Freshness.FRESH,
+                checked_at=datetime.now(UTC),
+            ), 0, reason
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "_query_service", _FullStub())
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert(
+            "demo", "/p", "python", "abc123", "indexed",
+            scip_stage=ScipStageFields(state="available"),
+        )
+    finally:
+        registry.close()
+
+    assert server.get_index_status(repo="demo")["fullRefreshReason"] == reason
+
+
+def test_get_index_status_rejects_off_enum_and_carried_reasons(
+    tmp_path: Path, monkeypatch,
+):
+    """Reasons outside the spec enum never leak through, and a carried
+    generation suppresses any stale full-refresh decision entirely."""
+    from datetime import UTC, datetime
+
+    from jarvis.query import Freshness, FreshnessSnapshot
+
+    class _ReasonStub:
+        def __init__(self, carried_sha: str | None, reason: str | None):
+            self.carried_sha = carried_sha
+            self.reason = reason
+
+        def get_index_status_details(self, repo, repo_path=None):
+            return True, FreshnessSnapshot(
+                commit="abc123",
+                generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                stale=False,
+                freshness=Freshness.FRESH,
+                checked_at=datetime.now(UTC),
+                scip_carried_from_sha=self.carried_sha,
+            ), 0, self.reason
+
+    monkeypatch.setattr(
+        server, "_query_service", _ReasonStub(None, "someone-elses-string"))
+    assert server.get_index_status(
+        repo="never-registered-anywhere")["fullRefreshReason"] is None
+
+    monkeypatch.setattr(
+        server, "_query_service", _ReasonStub("prev000", "depth-cap"))
+    assert server.get_index_status(
+        repo="never-registered-anywhere")["fullRefreshReason"] is None
+
+
+def test_get_index_status_counts_carried_documents_from_the_live_snapshot():
+    """The count comes from the same cached snapshot connection the status
+    read used — proven against a fixture snapshot with real sidecar rows."""
+    import sqlite3
+
+    slug_dir = config.index_dir(REPO)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    conn = sqlite3.connect(slug_dir / pointer)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS carried_documents ("
+            "document_id INTEGER PRIMARY KEY REFERENCES documents(id), "
+            "carried_from_sha TEXT NOT NULL)")
+        doc_ids = [row[0] for row in conn.execute(
+            "SELECT id FROM documents ORDER BY id LIMIT 2")]
+        conn.executemany(
+            "INSERT INTO carried_documents (document_id, carried_from_sha) "
+            "VALUES (?, 'prev000')",
+            [(doc_id,) for doc_id in doc_ids])
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload = server.get_index_status(repo=REPO)
+
+    assert payload["carriedDocumentCount"] == 2
 
 
 
@@ -572,14 +699,14 @@ def test_get_index_status_failed_run_with_live_pointer_reports_stale_navigation(
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
 
     class _LivePointerStub:
-        def get_index_status(self, repo, repo_path=None):
+        def get_index_status_details(self, repo, repo_path=None):
             return True, FreshnessSnapshot(
                 commit="abc123",
                 generated_at=datetime(2026, 1, 1, tzinfo=UTC),
                 stale=True,
                 freshness=Freshness.STALE,
                 checked_at=datetime.now(UTC),
-            )
+            ), 0, None
 
     monkeypatch.setattr(server, "_query_service", _LivePointerStub())
 
@@ -999,8 +1126,8 @@ def test_get_index_status_existing_keys_unchanged_for_a_legacy_snapshot():
 class _NotIndexedStub:
     """A QueryService whose repo has no published index."""
 
-    def get_index_status(self, repo: str, repo_path: str | None = None):
-        return False, None
+    def get_index_status_details(self, repo: str, repo_path: str | None = None):
+        return False, None, 0, None
 
 
 def test_status_reports_starting_immediately_after_spawn(tmp_path, monkeypatch):

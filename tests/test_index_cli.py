@@ -5219,7 +5219,8 @@ def test_watch_reindex_carries_scip_rows(tmp_path, monkeypatch):
         (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
         .read_text(encoding="utf-8"))
     assert (metadata["scip_mode"], metadata["carried_from_sha"],
-            metadata["carry_depth"]) == ("carried", first_sha, 1)
+            metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("carried", first_sha, 1, None)
     conn = sqlite3.connect(slug_dir / pointer)
     try:
         # The fixture SCIP docs are both unaffected by the real repo's
@@ -5238,7 +5239,42 @@ def test_watch_reindex_carries_scip_rows(tmp_path, monkeypatch):
             entry.scip_carry_depth) == ("available", None, 0)
     metadata = _read_published_metadata(config.index_dir(slug, data_root))
     assert (metadata["scip_mode"], metadata["carried_from_sha"],
-            metadata["carry_depth"]) == ("available", None, 0)
+            metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("available", None, 0, None)
+
+
+@pytest.mark.parametrize("reason", [
+    "threshold", "depth-cap", "not-carryable", "no-previous"])
+def test_watch_rejection_reason_is_published_on_full_metadata(
+    tmp_path, monkeypatch, reason,
+):
+    """A watch run whose carry decision falls through to full SCIP publishes
+    THAT decision with its exact generation. `no-previous` stays null: a
+    first index is not a refresh decision (controller ruling)."""
+    from jarvis import carry as carry_mod
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    def _reject(prev_meta, prev_doc_count, changed_count, closure_count):
+        return carry_mod.CarryDecision(False, reason, prev_meta)
+
+    monkeypatch.setattr(carry_mod, "decide", _reject)
+    _commit_repo_change(repo_dir, f"reject: {reason}")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    metadata = _read_published_metadata(config.index_dir(slug, data_root))
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert metadata["scip_mode"] == "available"
+    assert metadata["full_refresh_reason"] == (
+        None if reason == "no-previous" else reason)
+    assert entry is not None and entry.scip_state == "available"
 
 
 def test_disabled_run_metadata_matches_registry(tmp_path, monkeypatch):
@@ -5607,12 +5643,15 @@ def test_publish_metadata_payload_carry_fields():
     assert p["scip_mode"] == "carried"
     assert p["carried_from_sha"] == "prev000"
     assert p["carry_depth"] == 1
+    assert p["full_refresh_reason"] is None  # carries publish no decision
 
     full = _publish_metadata_payload(
         slug="demo", sha="s", published_at="t", generation="g",
         source_hash="sh", scip_mode="available",
-        carried_from_sha=None, carry_depth=0)
+        carried_from_sha=None, carry_depth=0,
+        full_refresh_reason="depth-cap")
     assert full["scip_mode"] == "available"
+    assert full["full_refresh_reason"] == "depth-cap"
 
 
 def test_manifest_file_hashes_uses_captured_paths():
@@ -5679,6 +5718,13 @@ def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
 
     slug_dir = config.index_dir("carrydemo", data_root)
     pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    metadata = json.loads(
+        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+        .read_text(encoding="utf-8"))
+    assert (metadata["scip_mode"], metadata["carried_from_sha"],
+            metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == \
+        ("carried", row.scip_carried_from_sha, 1, None)
     conn = sqlite3.connect(
         f"file:{slug_dir / pointer}?mode=ro&immutable=1", uri=True)
     try:
@@ -5705,3 +5751,10 @@ def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
         assert row.scip_carried_from_sha is None
     finally:
         reg.close()
+    slug_dir = config.index_dir("carrydemo", data_root)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    metadata = json.loads(
+        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+        .read_text(encoding="utf-8"))
+    assert (metadata["scip_mode"], metadata["full_refresh_reason"]) == \
+        ("available", "threshold")

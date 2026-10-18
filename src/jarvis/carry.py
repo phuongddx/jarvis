@@ -15,6 +15,10 @@ from jarvis.index_reader import IndexMetadata
 CARRY_DEPTH_CAP = 5
 CARRY_CLOSURE_THRESHOLD = 0.60
 CARRYABLE_STATES = frozenset({"available", "carried"})
+# Spec enum for a watch run's full-refresh decision. `no-previous` is
+# deliberately excluded: a first index is not a refresh decision, so it
+# surfaces as null (controller ruling, Task 7 fix 1).
+FULL_REFRESH_REASONS = frozenset({"not-carryable", "depth-cap", "threshold"})
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 from dataclasses import asdict
@@ -21,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 
 from jarvis import config, jobs, syntax, syntax_index
 from jarvis.graph import GraphStore, blast_radius
+from jarvis.carry import FULL_REFRESH_REASONS
 from jarvis.index_reader import IndexNotFoundError
 from jarvis.query import CapabilityUnavailableError, FreshnessSnapshot, QueryService
 from jarvis.registry import DEGRADED_STATUS, RegisteredRepo, origin_of, recovery_for
@@ -210,62 +210,35 @@ def _search_coverage_fields(repo: str) -> dict[str, Any]:
         return {"searchCoverage": None, "searchCoverageReason": str(exc)}
 
 
-def _carried_document_count(repo: str) -> int:
-    """How many SCIP documents the *currently published* generation carried
-    forward, straight from that snapshot's own sidecar table. Zero means
-    "not carried" (or no live snapshot); it is deliberately indistinguishable
-    from a legitimately empty carry — `scipMode` already carries that nuance.
-
-    Never raises: the pointer, table, and database can all legitimately be
-    absent (a full generation, a never-indexed repo, a publish race), and a
-    status probe must not turn any of those into an error.
-    """
-    try:
-        index_dir = config.index_dir(repo)
-        pointer = index_dir / "current"
-        if not pointer.is_file():
-            return 0
-        name = pointer.read_text(encoding="utf-8").strip()
-        if not name:
-            return 0
-        db_path = index_dir / name
-        if not db_path.is_file():
-            return 0
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
-        try:
-            has_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='carried_documents'"
-            ).fetchone()
-            if has_table is None:
-                return 0
-            return int(conn.execute(
-                "SELECT COUNT(*) FROM carried_documents"
-            ).fetchone()[0])
-        finally:
-            conn.close()
-    except Exception:  # Broad on purpose: same never-raise contract as above.
-        return 0
-
-
-def _carry_fields(repo: str, freshness: FreshnessSnapshot | None) -> dict[str, Any]:
-    """SCIP carry provenance for a status payload. `freshness` is the live
-    snapshot's evidence — authoritative for "this generation is carried";
-    the registry row contributes depth and the recorded full-refresh reason.
-    Never raises: a status response must survive a broken registry or disk."""
+def _carry_fields(
+    repo: str, freshness: FreshnessSnapshot | None,
+    carried_document_count: int, full_refresh_reason: str | None,
+) -> dict[str, Any]:
+    """SCIP carry provenance for a status payload. Freshness, count, and the
+    persisted decision reason all arrive from ONE snapshot open
+    (`QueryService.get_index_status_details`); the registry row only
+    contributes `scipMode` on a non-carried generation and `carryDepth`.
+    `fullRefreshReason` is constrained to the spec enum and is meaningful
+    only on a full generation — a carried generation has no full-refresh
+    decision to describe. Never raises: a status response must survive a
+    broken registry."""
     carried = freshness.scip_carried_from_sha if freshness is not None else None
     entry = _registry_entry(repo)
+    if carried is not None:
+        reason: str | None = None
+    else:
+        reason = (
+            full_refresh_reason
+            if full_refresh_reason in FULL_REFRESH_REASONS else None
+        )
     return {
         "scipMode": "carried" if carried else (
             entry.scip_state if entry is not None else "unknown"
         ),
         "carriedFromSha": carried,
         "carryDepth": entry.scip_carry_depth if entry is not None else 0,
-        "carriedDocumentCount": _carried_document_count(repo),
-        "fullRefreshReason": (
-            entry.status_reason
-            if entry is not None and carried is not None else None
-        ),
+        "carriedDocumentCount": carried_document_count,
+        "fullRefreshReason": reason,
     }
 
 
@@ -673,7 +646,9 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
     `starting`, `running`, `failed-at-startup`, or `abandoned`. The first two
     mean keep polling; the last two are terminal."""
     try:
-        indexed, freshness = _service().get_index_status(repo, repo_path)
+        indexed, freshness, carried_count, refresh_reason = (
+            _service().get_index_status_details(repo, repo_path)
+        )
     except Exception as exc:
         return {"error": str(exc)}
     try:
@@ -683,7 +658,8 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         # helper must not kill the published status response.
         capability_fields = {"last_index_run": None, "capabilities": None}
     try:
-        carry_fields = _carry_fields(repo, freshness)
+        carry_fields = _carry_fields(
+            repo, freshness, carried_count, refresh_reason)
     except Exception:
         carry_fields = {
             "scipMode": "unknown", "carriedFromSha": None, "carryDepth": 0,
