@@ -45,7 +45,14 @@ import sqlite3
 
 import pytest
 
-from jarvis.carry import CarryPlan, changed_paths, plan_carry, should_escalate
+from jarvis.carry import (
+    CARRY_ESCALATION_THRESHOLD,
+    CarryPlan,
+    carried_from_sha,
+    changed_paths,
+    plan_carry,
+    should_escalate,
+)
 from jarvis.syntax_index import CapturedFile, SourceManifest
 
 
@@ -169,6 +176,30 @@ def test_should_escalate_at_80_percent(tmp_path):
     assert should_escalate(below) is False
     assert should_escalate(at) is True
     assert should_escalate(CarryPlan(invalidated=frozenset({1}), total_documents=0)) is False
+
+
+def test_should_escalate_uses_stable_baseline_across_chained_carries():
+    # A previous carry already dropped 5 of a 10-doc baseline; 5 survive,
+    # this run invalidates 3 more -> cumulative 8/10 >= 80% -> escalate.
+    chained = CarryPlan(invalidated=frozenset({1, 2, 3}), total_documents=5,
+                        baseline_documents=10)
+    assert should_escalate(chained) is True
+    # Against the shrunk denominator the same run would NOT trip — the
+    # exact decay hole the baseline exists to close.
+    assert len(chained.invalidated) < CARRY_ESCALATION_THRESHOLD * chained.total_documents
+
+
+def test_carried_from_sha_coalesces_chained_carries(tmp_path):
+    conn = _fixture(tmp_path)
+    conn.execute(
+        "CREATE TABLE jarvis_snapshot (singleton INTEGER PRIMARY KEY,"
+        " commit_sha TEXT, scip_carried_from_sha TEXT)")
+    conn.execute("INSERT INTO jarvis_snapshot VALUES (1, 'watch2', 'origfull')")
+    conn.commit()
+    assert carried_from_sha(conn) == "origfull"   # previous was carried: propagate orig
+    conn.execute("UPDATE jarvis_snapshot SET scip_carried_from_sha = NULL")
+    conn.commit()
+    assert carried_from_sha(conn) == "watch2"     # previous was a full run
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -217,15 +248,22 @@ class CarryPlan:
 
     invalidated: frozenset[int]  # previous `documents.id` values dropped
     total_documents: int         # documents in the previous snapshot
+    # Denominator that does NOT decay across chained carries: the document
+    # count at the last FULL SCIP run. None on hand-built plans (tests) —
+    # `should_escalate` then falls back to `total_documents`.
+    baseline_documents: int | None = None
 
 
 def changed_paths(previous: sqlite3.Connection, manifest: SourceManifest) -> set[str]:
     """Repo paths whose content differs from the previous snapshot, plus
     new and removed paths. Old hashes come from the previous snapshot's
-    `syntax_files` (written by the same manifest hash at publish time)."""
-    old = dict(previous.execute("SELECT file_path, file_hash FROM syntax_files"))
+    `syntax_files` (written by the same manifest hash at publish time).
+    Only in-scope rows compare: out-of-scope paths never have SCIP
+    documents, and counting them as 'removed' every run is noise."""
+    old = dict(previous.execute(
+        "SELECT file_path, file_hash FROM syntax_files WHERE in_scope = 1"))
     new_paths = {c.file_path for c in manifest.files if c.in_scope}
-    changed = {p for p, h in old.items() if p not in new_paths or old.get(p) != h}
+    changed = {p for p in old if p not in new_paths}
     for captured in manifest.files:
         if captured.in_scope and old.get(captured.file_path) != captured.file_hash:
             changed.add(captured.file_path)
@@ -236,8 +274,10 @@ def plan_carry(previous: sqlite3.Connection, changed: set[str]) -> CarryPlan:
     """Invalidated = documents at changed paths ∪ documents mentioning any
     symbol DEFINED in a changed document (the closure, design §5)."""
     total = previous.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    baseline = _carry_baseline(previous) or total
     if not changed:
-        return CarryPlan(invalidated=frozenset(), total_documents=total)
+        return CarryPlan(invalidated=frozenset(), total_documents=total,
+                         baseline_documents=baseline)
 
     path_ph = ",".join("?" for _ in changed)
     changed_docs = frozenset(
@@ -248,7 +288,8 @@ def plan_carry(previous: sqlite3.Connection, changed: set[str]) -> CarryPlan:
         )
     )
     if not changed_docs:
-        return CarryPlan(invalidated=frozenset(), total_documents=total)
+        return CarryPlan(invalidated=frozenset(), total_documents=total,
+                         baseline_documents=baseline)
 
     doc_ph = ",".join("?" for _ in changed_docs)
     closure = frozenset(
@@ -269,25 +310,53 @@ def plan_carry(previous: sqlite3.Connection, changed: set[str]) -> CarryPlan:
         )
     )
     return CarryPlan(
-        invalidated=frozenset(changed_docs | closure), total_documents=total
+        invalidated=frozenset(changed_docs | closure), total_documents=total,
+        baseline_documents=baseline,
     )
 
 
 def should_escalate(plan: CarryPlan) -> bool:
-    """True when the invalidated set covers >= 80% of previous documents
-    (design §8): a full run serves better navigation and the merge saves
-    nothing. Zero-document snapshots never escalate (nothing to carry)."""
-    return plan.total_documents > 0 and (
-        len(plan.invalidated) >= CARRY_ESCALATION_THRESHOLD * plan.total_documents
+    """True when cumulative invalidation covers >= 80% of the BASELINE —
+    the document count at the last full SCIP run (design §8). Measuring
+    against the baseline, not the previous (already shrunk) generation,
+    means chained watch carries cannot decay coverage past the threshold
+    without tripping it. Zero-baseline snapshots never escalate."""
+    baseline = plan.baseline_documents if plan.baseline_documents is not None else plan.total_documents
+    return baseline > 0 and (
+        baseline - (plan.total_documents - len(plan.invalidated))
+        >= CARRY_ESCALATION_THRESHOLD * baseline
     )
 
 
-def carried_from_sha(previous: sqlite3.Connection) -> str | None:
-    """The commit the previous snapshot's SCIP data was indexed at — the
-    value recorded as `scip_carried_from_sha` on a carried generation."""
+def _carry_baseline(previous: sqlite3.Connection) -> int | None:
+    """The previous generation's `scip_carry_baseline` when it was itself
+    carried (chained carry); None on a full-run snapshot."""
     try:
+        columns = {row[1] for row in previous.execute(
+            "PRAGMA table_info(jarvis_snapshot)")}
+        if "scip_carry_baseline" not in columns:
+            return None
         row = previous.execute(
-            "SELECT commit_sha FROM jarvis_snapshot WHERE singleton = 1"
+            "SELECT scip_carry_baseline FROM jarvis_snapshot WHERE singleton = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:  # legacy snapshot without the table
+        return None
+    return row[0] if row is not None and row[0] is not None else None
+
+
+def carried_from_sha(previous: sqlite3.Connection) -> str | None:
+    """The commit the previous snapshot's SCIP data was last FULLY indexed
+    at — the value recorded as `scip_carried_from_sha` on a carried
+    generation. COALESCE matters for chained carries: a previous carried
+    generation's own `commit_sha` is the last watch commit, not the commit
+    its SCIP data reflects."""
+    try:
+        columns = {row[1] for row in previous.execute(
+            "PRAGMA table_info(jarvis_snapshot)")}
+        expr = ("COALESCE(scip_carried_from_sha, commit_sha)"
+                if "scip_carried_from_sha" in columns else "commit_sha")
+        row = previous.execute(
+            f"SELECT {expr} FROM jarvis_snapshot WHERE singleton = 1"
         ).fetchone()
     except sqlite3.OperationalError:  # legacy snapshot without the table
         return None
@@ -299,7 +368,7 @@ def carried_from_sha(previous: sqlite3.Connection) -> str | None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_carry.py -v`
-Expected: PASS (6 tests)
+Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -498,13 +567,17 @@ def apply_carry(dest: sqlite3.Connection, previous: sqlite3.Connection,
           f"chunk_id IN (SELECT id FROM chunks WHERE document_id IN ({doc_ph}))",
           params)
     _copy("defn_enclosing_ranges", f"document_id IN ({doc_ph})", params)
-    # Referenced-by-carried-rows only: reads dest's already-copied tables,
-    # so unreferenced symbols (e.g. those defined only in invalidated docs)
-    # are not carried.
-    _copy("global_symbols",
-          "id IN (SELECT symbol_id FROM mentions"
-          " UNION SELECT symbol_id FROM defn_enclosing_ranges)",
-          ())
+    # Referenced-by-carried-rows ONLY, and the reference set must come
+    # from DEST (already copied), not previous: previous's mentions still
+    # contain invalidated documents' rows, so selecting against them would
+    # carry symbols nobody in the new generation references — stale
+    # `relationships` rows would then surface in type-hierarchy scans
+    # (query.py's full-table reads).
+    referenced = [row[0] for row in dest.execute(
+        "SELECT symbol_id FROM mentions"
+        " UNION SELECT symbol_id FROM defn_enclosing_ranges")]
+    sym_ph = ",".join("?" for _ in referenced) or "NULL"
+    _copy("global_symbols", f"id IN ({sym_ph})", tuple(referenced))
     dest.commit()
     return len(carried_ids)
 ```
@@ -512,7 +585,7 @@ def apply_carry(dest: sqlite3.Connection, previous: sqlite3.Connection,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_carry.py -v`
-Expected: PASS (9 tests)
+Expected: PASS (10 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -533,7 +606,7 @@ git commit -m "feat(index): add scip carry merge into fresh snapshot"
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: `SCIP_STATES` includes `"carried"`; `finalize_snapshot(conn, *, generation, commit_sha, published_at, source_hash, scip_state, scip_carried_from_sha: str | None = None)`; `SnapshotFacts.scip_carried_from_sha: str | None = None`; `IndexMetadata.scip_carried_from_sha: str | None = None`.
+- Produces: `SCIP_STATES` includes `"carried"`; `finalize_snapshot(conn, *, generation, commit_sha, published_at, source_hash, scip_state, scip_carried_from_sha: str | None = None, scip_carry_baseline: int | None = None)`; `SnapshotFacts.scip_carried_from_sha: str | None = None` and `.scip_carry_baseline: int | None = None`; `IndexMetadata.scip_carried_from_sha: str | None = None`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -579,9 +652,15 @@ In `tests/test_server_tools.py` or wherever `read_metadata` is tested:
 
 ```python
 def test_read_metadata_parses_scip_carried_from_sha(tmp_path):
-    ...build a metadata.json with "scip_carried_from_sha": "oldsha"...
+    d = tmp_path / "scip" / "p" / "r" / "b"
+    d.mkdir(parents=True)
+    (d / "index-x.metadata.json").write_text(json.dumps({
+        "project": "p", "repo": "r", "branch": "b",
+        "commit_sha": "new", "scip_carried_from_sha": "oldsha",
+    }))
     meta = read_metadata(str(tmp_path), "p", "r", "b", "index-x.db")
     assert meta.scip_carried_from_sha == "oldsha"
+    assert meta.commit_sha == "new"
 ```
 
 `_facts_fixture` follows `test_syntax_index.py`'s existing pattern
@@ -612,23 +691,40 @@ Expected: FAIL — `ValueError: invalid scip_state 'carried'` / missing kwarg / 
 - [ ] **Step 3: Implement**
 
 1. `registry.py:43`: add `"carried"` to the `SCIP_STATES` frozenset.
-2. `syntax_index.py` DDL: add `scip_carried_from_sha TEXT` as the last column of `jarvis_snapshot` (nullable).
-3. `SnapshotFacts`: add `scip_carried_from_sha: str | None = None`.
-4. `finalize_snapshot`: new keyword param `scip_carried_from_sha: str | None = None`; extend the `INSERT OR REPLACE` column list and values tuple; pass through to the returned `SnapshotFacts`.
-5. `_read_new_format_facts`: read the column only when present —
+2. `syntax_index.py` DDL: add two nullable last columns to `jarvis_snapshot`:
+   `scip_carried_from_sha TEXT` and `scip_carry_baseline INTEGER` (the
+   stable escalation denominator — document count at the last FULL run,
+   propagated across chained carries).
+3. `SnapshotFacts`: add `scip_carried_from_sha: str | None = None` and
+   `scip_carry_baseline: int | None = None`.
+4. `finalize_snapshot`: new keyword params `scip_carried_from_sha: str | None = None`
+   and `scip_carry_baseline: int | None = None`; extend the `INSERT OR REPLACE`
+   column list and values tuple; pass both through to the returned `SnapshotFacts`.
+5. `_read_new_format_facts`: read both new columns only when present —
 ```python
     columns = {row[1] for row in conn.execute("PRAGMA table_info(jarvis_snapshot)")}
     carried_from = (
         conn.execute("SELECT scip_carried_from_sha FROM jarvis_snapshot").fetchone()[0]
         if "scip_carried_from_sha" in columns else None
     )
+    carry_baseline = (
+        conn.execute("SELECT scip_carry_baseline FROM jarvis_snapshot").fetchone()[0]
+        if "scip_carry_baseline" in columns else None
+    )
 ```
-   (adjust to the function's existing row-unpacking style), and pass to `SnapshotFacts`.
+   (adjust to the function's existing row-unpacking style), and pass both to
+   `SnapshotFacts`.
 6. `index_reader.py`: add `scip_carried_from_sha: str | None = None` to `IndexMetadata`; in `read_metadata` add `scip_carried_from_sha=raw.get("scip_carried_from_sha")`.
+7. Check the state's consumers: update the comment above `SCIP_STATES`
+   (`registry.py:41`), and grep for enumerations of scip states in
+   `registry.recovery_for` and `dashboard.py` — add a `carried` branch
+   (recovery hint: "run an explicit `jarvis index` to refresh") wherever
+   states are mapped to advice. `server.py` passes the string through
+   untouched, so it needs no change.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_registry.py tests/test_syntax_integration.py tests/test_server_tools.py -v`
+Run: `uv run pytest tests/test_registry.py tests/test_syntax_index.py tests/test_query.py tests/test_server_tools.py -v`
 Expected: PASS, including all pre-existing tests (old snapshots without the column read as None).
 
 - [ ] **Step 5: Commit**
@@ -652,17 +748,21 @@ git commit -m "feat(index): carried scip state, snapshot facts, metadata field"
 
 - [ ] **Step 1: Write the failing test**
 
-In `tests/test_index_cli.py` (following its existing fake-subprocess conventions; add `from jarvis import index_cli` to the imports, set `JARVIS_DATA_DIR` to `tmp_path` first — the module's house pattern):
+In `tests/test_index_cli.py` (following its existing fake-subprocess conventions; add `from uuid import uuid4` and `from jarvis import index_cli` to the imports, set `JARVIS_DATA_DIR` to `tmp_path` first — the module's house pattern):
 
 ```python
 def test_watch_run_carries_scip_without_spawning_indexer(tmp_path, monkeypatch):
     repo = _offer_test_repo(tmp_path, "carry-repo")  # existing helper: copytree of fixtures/mini_py_repo + git init + commit
     slug = "carry-test"
 
-    previous = _snapshot_with_scip(tmp_path)  # new helper: sqlite db with documents/
-    # chunks/mentions populated, syntax_files hashes matching the repo, and a
-    # jarvis_snapshot row (commit_sha="oldsha", scip_state="available")
-    monkeypatch.setattr(index_cli, "_open_previous_snapshot", lambda *_: previous)
+    _snapshot_with_scip(tmp_path).close()   # builds tmp_path/"previous.db"
+    # A FRESH connection per call: stage 2 opens AND closes its own
+    # `_open_previous_snapshot` result, so returning one shared object
+    # hands stage 3 a closed connection (review finding — the planning
+    # except would silently escalate and the test would fail on its own
+    # tripwire).
+    monkeypatch.setattr(index_cli, "_open_previous_snapshot",
+                        lambda *_: sqlite3.connect(tmp_path / "previous.db"))
 
     spawned = []
     def _fail_if_spawned(*a, **k):
@@ -688,8 +788,9 @@ def test_watch_run_carries_scip_without_spawning_indexer(tmp_path, monkeypatch):
 
 def test_explicit_run_never_carries(tmp_path, monkeypatch):
     repo = _offer_test_repo(tmp_path, "carry-repo")
-    previous = _snapshot_with_scip(tmp_path)
-    monkeypatch.setattr(index_cli, "_open_previous_snapshot", lambda *_: previous)
+    _snapshot_with_scip(tmp_path).close()
+    monkeypatch.setattr(index_cli, "_open_previous_snapshot",
+                        lambda *_: sqlite3.connect(tmp_path / "previous.db"))
     calls = []
     monkeypatch.setattr(index_cli, "_attempt_scip",
                         lambda *a, **k: calls.append(a) or _available_attempt(tmp_path))
@@ -758,8 +859,11 @@ def _snapshot_with_scip(tmp_path, *, with_nav: bool = True) -> sqlite3.Connectio
 def _available_attempt(tmp_path) -> "index_cli.ScipAttempt":
     """Converter output with TWO documents (same 1-of-2 under-threshold
     arithmetic as `_snapshot_with_scip`) so the Task 6 e2e's follow-up
-    watch run carries instead of escalating."""
-    db = tmp_path / "converted.db"
+    watch run carries instead of escalating. A UNIQUE path per call: the
+    pipeline merges syntax tables and the snapshot row into `db_path` in
+    place, so a shared path would hand later runs a mutated db (review
+    finding — UNIQUE violation on re-insert)."""
+    db = tmp_path / f"converted-{uuid4().hex}.db"
     conn = sqlite3.connect(db)
     conn.executescript(_SCIP_TABLES_DDL)
     conn.executemany(
@@ -786,8 +890,9 @@ Third test — spec §10 item 5, escalation-not-corruption (previous SCIP unusab
 ```python
 def test_watch_run_with_unusable_previous_scip_runs_full(tmp_path, monkeypatch):
     repo = _offer_test_repo(tmp_path, "carry-repo")
-    previous = _snapshot_with_scip(tmp_path, with_nav=False)  # empty chunks/mentions
-    monkeypatch.setattr(index_cli, "_open_previous_snapshot", lambda *_: previous)
+    _snapshot_with_scip(tmp_path, with_nav=False).close()
+    monkeypatch.setattr(index_cli, "_open_previous_snapshot",
+                        lambda *_: sqlite3.connect(tmp_path / "previous.db"))
     calls = []
     monkeypatch.setattr(index_cli, "_attempt_scip",
                         lambda *a, **k: calls.append(a) or _available_attempt(tmp_path))
@@ -855,6 +960,7 @@ Expected: FAIL — `_attempt_scip` was called / `scip_state` is `available` not 
                         source_hash=manifest.source_hash,
                         scip_state="carried",
                         scip_carried_from_sha=carried_sha,
+                        scip_carry_baseline=carried.baseline_documents,
                     )
                     has_nav = index_has_navigation_data(conn)
                 finally:

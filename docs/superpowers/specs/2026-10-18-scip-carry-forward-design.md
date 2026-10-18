@@ -3,7 +3,7 @@
 - **Date:** 2026-10-18
 - **Status:** approved design (brainstorming); implementation plan to follow
 - **Options report:** `plans/reports/options-261018-1410-jarvis-diff-reindex-strategy.md` (Option A, medium confidence)
-- **Policy decision (user):** watch runs carry SCIP forward; explicit `jarvis index` / MCP `indexRepo` always run the full indexer; a closure covering ≥80% of previous SCIP documents escalates to a full run.
+- **Policy decision (user):** watch runs carry SCIP forward; explicit `jarvis index` / MCP `indexRepo` always run the full indexer; cumulative invalidation covering ≥80% of the **baseline** document count (documents at the last full SCIP run — a stable denominator that chained carries cannot decay) escalates to a full run.
 
 ## 1. Problem
 
@@ -69,7 +69,7 @@ carry_eligible = watch AND previous snapshot has usable SCIP data
 
 if carry_eligible:
     invalidated, carry_total = closure(previous, changed_paths)
-    if invalidated_count >= ceil(0.8 * previous_scip_documents):
+    if baseline_dropped_count >= ceil(0.8 * baseline_documents):
         attempt = _attempt_scip(...)          # escalation — full run
     else:
         carry = plan_carry(previous, invalidated)
@@ -156,8 +156,12 @@ match the carried generation for carried documents and be cleared for
 invalidated documents, so routing falls invalidated files back to syntax
 exactly as a SCIP-less generation would.
 
-`finalize_snapshot` then records `scip_state="carried"` and
-`scip_carried_from_sha=<previous snapshot's commit_sha>`. Publishing,
+`finalize_snapshot` then records `scip_state="carried"`,
+`scip_carried_from_sha=COALESCE(previous.scip_carried_from_sha, previous.commit_sha)`
+(propagation matters: on a chained carry the previous generation's own
+`commit_sha` is the last watch commit, not the commit its SCIP data
+reflects), and `scip_carry_baseline` (the stable escalation denominator,
+propagated unchanged across carries, reset implicitly by every full run).
 pointer flip, cleanup, and the graph rebuild (stage 6) are untouched: the
 graph reads the merged tables, so carried edges survive exactly as a full
 run's would for unchanged files.
@@ -168,7 +172,8 @@ run's would for unchanged files.
   `indexed` — carrying is policy, not failure; `degraded` keeps its
   "SCIP attempted and failed" meaning.
 - **Snapshot metadata** (`.metadata.json` + `jarvis_snapshot` facts):
-  `scip_carried_from_sha`.
+  `scip_carried_from_sha` and `scip_carry_baseline` (both nullable; old
+  snapshots read as None — the read paths PRAGMA-guard the columns).
 - **Freshness (`query.py`):** the snapshot's `commit_sha` is the new HEAD,
   so the existing sha comparison would report "fresh" while nav data may be
   older. `FreshnessSnapshot` gains an `scip_as_of` field populated from
@@ -189,8 +194,12 @@ run's would for unchanged files.
   run. Worst case equals today's behavior.
 - Escalated full attempt fails → today's degraded publish path
   (SCIP-less generation, `scip_state` from the failure).
-- Threshold: `len(invalidated) >= ceil(0.8 * previous_scip_document_count)`
-  → full run (saves nothing, serves better nav).
+- Threshold: cumulative invalidation `baseline - carried_documents >=
+  ceil(0.8 * baseline)` → full run. The baseline is the document count at
+  the last full SCIP run, NOT the previous (already shrunk) generation:
+  invalidated documents stay absent from later carries, so measuring
+  against survivors would let chained watch carries decay coverage past
+  the threshold without ever tripping it.
 - Carry never runs when SCIP is disabled, unsupported, or suppressed; those
   paths are byte-for-byte today's.
 
