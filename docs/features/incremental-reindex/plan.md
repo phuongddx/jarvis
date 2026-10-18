@@ -237,7 +237,8 @@ def test_changed_paths_by_hash(tmp_path):
     conn = sqlite3.connect(tmp_path / "prev.db")
     try:
         assert changed_paths(conn, {"a.py": "ha1", "b.py": "CHANGED"}) == {"b.py"}
-        assert changed_paths(conn, {"a.py": "ha1", "new.py": "x"}) == {"new.py"}
+        # b.py vanished from the capture (deletion) AND new.py is new:
+        assert changed_paths(conn, {"a.py": "ha1", "new.py": "x"}) == {"b.py", "new.py"}
     finally:
         conn.close()
 
