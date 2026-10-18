@@ -5847,10 +5847,12 @@ def test_manifest_file_hashes_uses_captured_paths():
 @pytest.mark.integration
 @pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
 def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
-    """Real-toolchain carry cycle: a watch run after an available baseline
-    drops only the changed importing document (plus no closure — b.py
-    defines nothing), publishes depth-1 provenance, and the fifth further
-    carry attempt trips the depth cap back to a full `available` reset."""
+    """Real-toolchain depth-cap cycle with eight independent SCIP
+    documents: each watch round changes a DIFFERENT leaf document, so
+    every diff stays a one-document carry — reasons stay null through
+    depth 5, then the sixth consecutive carry request runs full with
+    full_refresh_reason="depth-cap" and resets depth to 0 (spec: cap 5 /
+    sixth request full). The threshold gate has its own test below."""
     data_root = tmp_path / "data"
     monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
     repo = tmp_path / "repo"
@@ -5860,11 +5862,14 @@ def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
         subprocess.run(["git", *args], cwd=repo, check=True,
                        capture_output=True, text=True)
 
+    leaves = [f"leaf{i}.py" for i in range(1, 8)]
+    (repo / "core.py").write_text(
+        "class Core:\n    def ping(self):\n        return 1\n")
+    for leaf in leaves:
+        (repo / leaf).write_text("from core import Core\nCore().ping()\n")
     git("init", "-q")
     git("config", "user.email", "t@t")
     git("config", "user.name", "t")
-    (repo / "a.py").write_text("class A:\n    def f(self):\n        return 1\n")
-    (repo / "b.py").write_text("from a import A\nA().f()\n")
     git("add", ".")
     git("commit", "-qm", "initial")
 
@@ -5878,46 +5883,56 @@ def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
     finally:
         reg.close()
 
-    (repo / "b.py").write_text("from a import A\nA().f()\n# touched\n")
-    assert index_repo(repo, slug="carrydemo", root=data_root,
-                      semantic=False, watch=True) == "carrydemo"
+    slug_dir = config.index_dir("carrydemo", data_root)
+
+    def read_meta() -> dict:
+        pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+        return json.loads(
+            (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+            .read_text(encoding="utf-8"))
+
+    # Five consecutive carries, each a different survivor document.
+    for i, leaf in enumerate(leaves[:5], start=1):
+        (repo / leaf).write_text(
+            f"from core import Core\nCore().ping()\n# touched {i}\n")
+        git("add", ".")
+        git("commit", "-qm", f"touch {leaf}")
+        assert index_repo(repo, slug="carrydemo", root=data_root,
+                          semantic=False, watch=True) == "carrydemo"
+        metadata = read_meta()
+        assert (metadata["scip_mode"], metadata["carry_depth"],
+                metadata["full_refresh_reason"]) == ("carried", i, None)
+        if i == 1:
+            pointer = (slug_dir / "current").read_text(
+                encoding="utf-8").strip()
+            conn = sqlite3.connect(
+                f"file:{slug_dir / pointer}?mode=ro&immutable=1", uri=True)
+            try:
+                # Only the changed leaf was dropped: 7 independent
+                # documents survive, all carried with provenance.
+                assert conn.execute(
+                    "SELECT COUNT(*) FROM documents").fetchone()[0] == 7
+                assert conn.execute(
+                    "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 7
+            finally:
+                conn.close()
+
     reg = Registry(data_root / "registry.db")
     try:
         row = reg.get("carrydemo")
         assert row is not None
-        assert row.scip_state == "carried"
-        assert row.scip_carry_depth == 1
+        assert (row.scip_state, row.scip_carry_depth) == ("carried", 5)
         assert row.scip_carried_from_sha is not None
     finally:
         reg.close()
 
-    slug_dir = config.index_dir("carrydemo", data_root)
-    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
-    metadata = json.loads(
-        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
-        .read_text(encoding="utf-8"))
-    assert (metadata["scip_mode"], metadata["carried_from_sha"],
-            metadata["carry_depth"],
-            metadata["full_refresh_reason"]) == \
-        ("carried", row.scip_carried_from_sha, 1, None)
-    conn = sqlite3.connect(
-        f"file:{slug_dir / pointer}?mode=ro&immutable=1", uri=True)
-    try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] >= 1
-        assert {r[0] for r in conn.execute(
-            "SELECT relative_path FROM documents")} == {"a.py"}
-    finally:
-        conn.close()
-
-    # Depth cap: five more carry-depth generations force a full run
-    # (depths 2..5, then the sixth attempt sees prev depth 5 >= cap).
-    for i in range(5):
-        (repo / "b.py").write_text(f"# touched {i}\n")
-        git("add", ".")
-        git("commit", "-qm", f"t{i}")
-        assert index_repo(repo, slug="carrydemo", root=data_root,
-                          semantic=False, watch=True) == "carrydemo"
+    # Sixth consecutive carry request: the depth cap forces a full run.
+    (repo / leaves[5]).write_text(
+        "from core import Core\nCore().ping()\n# touched 6\n")
+    git("add", ".")
+    git("commit", "-qm", f"touch {leaves[5]}")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
     reg = Registry(data_root / "registry.db")
     try:
         row = reg.get("carrydemo")
@@ -5926,10 +5941,66 @@ def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
         assert row.scip_carried_from_sha is None
     finally:
         reg.close()
+    metadata = read_meta()
+    assert (metadata["scip_mode"], metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("available", 0, "depth-cap")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_watch_carry_threshold_on_whole_snapshot_change(
+    tmp_path: Path, monkeypatch,
+):
+    """Real-toolchain threshold gate, kept separate from the depth-cap
+    cycle: after the first carry retires the only other document,
+    re-touching that same document changes 100% of the previous document
+    set, so the next watch tick is a threshold full run — never a carry."""
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True, text=True)
+
+    (repo / "core.py").write_text(
+        "class Core:\n    def ping(self):\n        return 1\n")
+    (repo / "b.py").write_text("from core import Core\nCore().ping()\n")
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("add", ".")
+    git("commit", "-qm", "initial")
+
     slug_dir = config.index_dir("carrydemo", data_root)
-    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
-    metadata = json.loads(
-        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
-        .read_text(encoding="utf-8"))
-    assert (metadata["scip_mode"], metadata["full_refresh_reason"]) == \
-        ("available", "threshold")
+
+    def read_meta() -> dict:
+        pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+        return json.loads(
+            (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+            .read_text(encoding="utf-8"))
+
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False) == "carrydemo"
+
+    (repo / "b.py").write_text(
+        "from core import Core\nCore().ping()\n# touched\n")
+    git("add", ".")
+    git("commit", "-qm", "first touch")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
+    metadata = read_meta()
+    assert metadata["scip_mode"] == "carried"
+    assert metadata["carry_depth"] == 1
+
+    # 1 changed document / 1 surviving document = 100% > 60% threshold.
+    (repo / "b.py").write_text(
+        "from core import Core\nCore().ping()\n# touched again\n")
+    git("add", ".")
+    git("commit", "-qm", "second touch")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
+    metadata = read_meta()
+    assert (metadata["scip_mode"], metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("available", 0, "threshold")
