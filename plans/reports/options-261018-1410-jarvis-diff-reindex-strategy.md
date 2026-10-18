@@ -4,8 +4,8 @@ schema_version: 1
 title: "How should jarvis reindex after a pull or edit burst?"
 slug: "jarvis-diff-reindex-strategy"
 date: 2026-10-18
-recommendation: A
-hybrid_of: []
+recommendation: A+B
+hybrid_of: [A, B]
 confidence: medium
 options:
   - {id: A, title: "Carry-forward with closure invalidation"}
@@ -17,7 +17,7 @@ options:
 
 ## Answer
 
-Recommended: Option A — Carry-forward with closure invalidation (confidence: medium). A is the only option that attacks the dominant cost for the real pull and watch cases while staying inside jarvis's own process boundary: no forked binaries, and stale data is labeled through the same degradation machinery the server already exposes. B's no-op win is mostly subsumed (an unchanged diff yields an empty closure, so the indexer is skipped anyway), and C fails the distribution constraint.
+Recommended: **A+B composed** — B's same-HEAD no-op guard first, then A's carry-forward with closure invalidation (confidence: medium). The two are composable, not competing: B is one guard at the top of `_index_repo_locked` and kills the 53s warm identical run that A still pays (capture, syntax, zoekt, semantic model load). A then attacks the dominant cost for the real pull and watch cases while staying inside jarvis's own process boundary: no forked binaries, stale data labeled through existing degradation machinery. C fails the distribution constraint.
 
 ## Question and context
 
@@ -29,6 +29,8 @@ Every jarvis index run rebuilds from scratch: only the published commit sha is c
 
 - Publishing stays atomic: immutable index-<sha>-<generation>.db plus a current pointer flip; readers never see partial state
 - Navigation answers stay honest: reused SCIP data must be labeled (scip_state, freshness), never served as fresh
+- Honesty is per-document, not just per-snapshot: a carried generation mixes carried-SCIP docs and syntax-only docs in one snapshot; query results must carry provenance
+- Chained carries have a hard depth cap (design must pick N); stale-answer window cannot grow without bound
 - No forked or patched indexer binaries; indexers ship as pinned prebuilt executables
 - A skipped or degraded SCIP stage never fails the run (existing stage-3 contract)
 
@@ -43,7 +45,9 @@ Every jarvis index run rebuilds from scratch: only the published commit sha is c
 
 ### Option A — Carry-forward with closure invalidation
 
-**Summary:** Compute changed files from the capture hashes, use the previous snapshot's own mentions data to find every file that references symbols defined in changed files (the reverse-symbol closure), copy those SCIP rows forward untouched, and let invalidated files fall back to syntax-only navigation under a new scip_state like carried@<old-sha>. A full SCIP run still happens on explicit indexRepo calls or when the closure exceeds a threshold.
+**Summary:** Compute changed files from the capture hashes, use the previous snapshot's own mentions data to find every file that references symbols defined in changed files (the reverse-symbol closure), build the new snapshot as a **filtered copy with deletions** of the previous one (delete rows for changed + closure-invalidated documents; chunks via document_id, mentions via chunk_id, defn_enclosing_ranges via document_id), and let invalidated files fall back to syntax-only navigation under a new scip_state like carried@<old-sha>. The incremental path runs **no SCIP indexer at all**. A full run still happens on explicit indexRepo calls, when the closure exceeds a threshold, or when carry depth hits the cap.
+
+**Construction note (spec-defining):** this is a filtered copy, *not* a two-index merge. Because no second fresh SCIP index exists in the incremental path, there is no symbol-ID remapping across `global_symbols` — surviving mentions keep their existing FK targets. Orphaned `global_symbols` rows (no surviving mentions) may be retained (simpler) or pruned (smaller DB across many carries); the design picks one. A true merge would require ID translation and is explicitly out of scope.
 
 **Pros**
 
@@ -53,15 +57,15 @@ Every jarvis index run rebuilds from scratch: only the published commit sha is c
 
 **Cons**
 
-- Bad, because not bit-identical to a full run: a new competing definition in a changed file can silently re-point references in files outside the closure until the next full run
-- Bad, because a new scip_state value plus a snapshot merge path that server.py, getIndexStatus, and the dashboard must all understand
+- Bad, because not bit-identical to a full run: a new competing definition in a changed file can silently re-point references in files outside the closure until the next full run; a renamed/removed symbol in a changed file leaves old `global_symbols` rows referenced by carried files (queries for the old name return labeled phantom hits; queries for the new name miss old-name references inside carried files)
+- Bad, because honesty requires **per-document provenance**, not just one new scip_state value: a carried generation mixes carried-SCIP and syntax-only docs, and `findReferences` results mixing both must label each. Touch points: per-doc provenance marker (column or sidecar), `registry.py` `SCIP_STATES` closed-set vocabulary + snapshot counters (`scip_outlines/definitions/references/calls/types` defined as carried-row counts), server.py, getIndexStatus, dashboard
 - Bad, because carry-forward needs a previous generation with usable SCIP data; after a failed or unavailable run it degrades to a full re-run anyway
 
 **Best when:** Watch-mode latency and big-repo reindex time matter more than bit-identical SCIP freshness, and periodic full refreshes are acceptable.
 
 ### Option B — Same-HEAD no-op short-circuit
 
-**Summary:** One guard at the top of the pipeline: when the published commit sha equals HEAD and the source hash is unchanged, publish nothing and return success. Optionally let zoekt keep its own shard when nothing moved.
+**Summary:** One guard at the top of the pipeline: when the published commit sha equals HEAD and the source hash is unchanged, publish nothing and return success. Optionally let zoekt keep its own shard when nothing moved. **Composed into the recommendation** — this guard runs before A's carry-forward.
 
 **Pros**
 
@@ -96,15 +100,15 @@ Every jarvis index run rebuilds from scratch: only the published commit sha is c
 
 ## Recommendation
 
-**Choice:** Option A — Carry-forward with closure invalidation
+**Choice:** **A+B composed** — B's no-op guard, then A's carry-forward with closure invalidation
 
-**Rationale:** A is the only option that attacks the dominant cost for the real pull and watch cases while staying inside jarvis's own process boundary: no forked binaries, and stale data is labeled through the same degradation machinery the server already exposes. B's no-op win is mostly subsumed (an unchanged diff yields an empty closure, so the indexer is skipped anyway), and C fails the distribution constraint.
+**Rationale:** A attacks the dominant cost for the real pull and watch cases while staying inside jarvis's own process boundary: no forked binaries, stale data labeled through existing degradation machinery. B is composable, nearly free, and covers the case A does not — the identical re-run (agent re-calls indexRepo, dashboards, CI) where A still pays capture + syntax + zoekt + warm semantic load. The no-op guard's status bookkeeping (must not flip registry statuses or clear prior SCIP failure records) is defined up front rather than deferred. C fails the distribution constraint.
 
 **Trade-offs accepted**
 
-- a small class of stale answers (resolution flips) until the next full SCIP run
-- one new scip_state value and a snapshot merge path to maintain
-- no-op runs still pay capture, syntax and zoekt (a few seconds) rather than B's full skip
+- a small class of stale answers (resolution flips, rename phantoms) until the next full SCIP run
+- per-document provenance plus one new scip_state value and a filtered-copy snapshot path to maintain
+- (B's residual risk) no-op guard must leave registry status and failure records untouched — subtle bookkeeping defined at design time
 
 **Confidence:** medium
 
@@ -120,9 +124,10 @@ Every jarvis index run rebuilds from scratch: only the published commit sha is c
 | --- | --- | --- |
 | scip-python and scip-typescript CLIs expose no incremental, partial, or merge flags | source | scip-python --help and scip-typescript --help output, checked 2026-10-18 |
 | The scip CLI has no merge command; expt-convert is one-shot whole-index to SQLite | source | scip --help output (v0.9.0-dev), checked 2026-10-18 |
-| The converted SCIP schema is per-document keyed (documents.relative_path UNIQUE; chunks, mentions, defn_enclosing_ranges reference document ids), so per-file copy-forward is structurally possible | source | .schema dump of ~/.jarvis/scip/_/polaris-codebase-registry/_/index-73db74ae....db |
+| The converted SCIP schema is per-document keyed (documents.relative_path UNIQUE; chunks, mentions, defn_enclosing_ranges reference document ids; mentions/defn_enclosing_ranges FK into shared global_symbols UNIQUE(symbol)), so filtered-copy carry-forward is structurally possible without ID remapping | source | .schema dump of the populated ~/.jarvis/scip/_/polaris-codebase-registry/_/index-73db74ae58b3....db (the 73db74ae39... sibling is a 0-byte scratch leftover) |
 | Reverse-symbol closure on a real 30-document snapshot is millisecond-cheap: 2/8/29/64 defined symbols invalidate 3/2/8/9 documents respectively | source | SQL closure queries on the same snapshot, this session |
-| Stage costs measured on this repo: scip-python 11.8s, expt-convert 0.26s, zoekt 0.73s; full run 107.6s cold and 53.1s warm same-HEAD | source | timed commands run 2026-10-18 (time jarvis index ., time scip-python index, time zoekt-git-index) |
+| Stage costs measured on this repo: scip-python 11.8s, expt-convert 0.26s, zoekt 0.73s; full run 107.6s cold, 53.1s warm same-HEAD with semantic (~13-15s non-semantic warm) | source | timed commands run 2026-10-18 (time jarvis index ., time scip-python index, time zoekt-git-index) |
+| registry.py validates scip_state against a closed SCIP_STATES set and rejects unknown values | source | src/jarvis/registry.py "invalid scip_state" guard |
 | The syntax baseline already reuses per-file rows from the previous snapshot when file_hash and grammar_identity match | source | src/jarvis/syntax_index.py:524-531 |
 | Zoekt is deliberately forced non-incremental and upstream incrementality is repo-granularity, which a pull defeats anyway | source | src/jarvis/index_cli.py:661-675 |
 | Watch is a 5s debounce into the full pipeline, and the known gap is SCIP/Zoekt being all-or-nothing | source | docs/kilo-vs-jarvis-indexing.md:28,58,79 |
@@ -131,10 +136,13 @@ Every jarvis index run rebuilds from scratch: only the published commit sha is c
 
 ## Open questions
 
-- What triggers a full SCIP refresh: explicit indexRepo only, N carried generations, or a closure-size threshold?
-- Should getIndexStatus expose a distinct freshness field for carried generations?
+- What triggers a full SCIP refresh: explicit indexRepo only, N carried generations, or a closure-size threshold? (depth cap N is mandatory per constraints; pick default)
+- Per-document provenance representation: column on documents, sidecar table, or derived from a carried-doc manifest?
+- Should getIndexStatus expose a distinct freshness field for carried generations (flat vs per-capability object)?
 - Should watch default to carry-forward while explicit indexRepo calls always run full SCIP?
+- Orphaned global_symbols after deletion: prune or retain?
+- After a failed full run beyond N carries, does the last carried snapshot stay current (better degraded state) or force syntax-only?
 
 ## Next step
 
-Approve option A and start the architectural design flow (clarifying questions, then a written spec).
+Approve A+B and start the architectural design flow (clarifying questions, then a written spec). Fold in the red-team revisions (filtered-copy construction, per-document provenance, SCIP_STATES vocabulary, depth cap, evidence fixes) — see `red-team-261018-1809-jarvis-diff-reindex-options-review-report.md`.
