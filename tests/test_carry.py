@@ -135,3 +135,60 @@ def test_published_metadata_reads_pointer_target(tmp_path):
     meta = published_metadata(slug_dir)
     assert meta.scip_mode == "carried"
     assert published_metadata(tmp_path / "missing") is None
+
+
+@pytest.mark.parametrize("pointer_bytes", [b"", b"\xff\xfe"])
+def test_malformed_pointer_degrades_to_none(tmp_path, pointer_bytes):
+    """Invalid UTF-8 pointer bytes (not just missing files) must read as
+    "no published snapshot" — the failure model is a full run, never a
+    raise through the carry/no-op boundary."""
+    from jarvis.carry import pointer_target, published_metadata
+
+    slug_dir = tmp_path / "slug"
+    slug_dir.mkdir()
+    (slug_dir / "current").write_bytes(pointer_bytes)
+    assert pointer_target(slug_dir) == ""
+    assert published_metadata(slug_dir) is None
+
+
+@pytest.mark.parametrize("payload", ["[]", '"just-a-string"', "42"])
+def test_non_object_metadata_degrades_to_none(tmp_path, payload):
+    """JSON that parses but is not an object must return None, exactly
+    like the read-side metadata reader — not a TypeError from
+    IndexMetadata.from_json."""
+    from jarvis.carry import published_metadata
+
+    slug_dir = tmp_path / "slug"
+    slug_dir.mkdir()
+    (slug_dir / "index-abc-1.db").touch()
+    (slug_dir / "index-abc-1.metadata.json").write_text(payload,
+                                                        encoding="utf-8")
+    (slug_dir / "current").write_text("index-abc-1.db")
+    assert published_metadata(slug_dir) is None
+
+
+@pytest.mark.parametrize("carry_depth", ["not-a-number", {"x": 1}, [1]])
+def test_malformed_carry_depth_degrades_to_none(tmp_path, carry_depth):
+    from jarvis.carry import published_metadata
+
+    slug_dir = tmp_path / "slug"
+    slug_dir.mkdir()
+    (slug_dir / "index-abc-1.db").touch()
+    (slug_dir / "index-abc-1.metadata.json").write_text(json.dumps({
+        "project": "_", "repo": "demo", "branch": "_",
+        "commit_sha": "abc", "carry_depth": carry_depth}),
+        encoding="utf-8")
+    (slug_dir / "current").write_text("index-abc-1.db")
+    assert published_metadata(slug_dir) is None
+
+
+def test_metadata_missing_required_keys_degrades_to_none(tmp_path):
+    from jarvis.carry import published_metadata
+
+    slug_dir = tmp_path / "slug"
+    slug_dir.mkdir()
+    (slug_dir / "index-abc-1.db").touch()
+    (slug_dir / "index-abc-1.metadata.json").write_text(
+        json.dumps({"commit_sha": "abc"}), encoding="utf-8")
+    (slug_dir / "current").write_text("index-abc-1.db")
+    assert published_metadata(slug_dir) is None

@@ -32,7 +32,7 @@ class CarryDecision:
 def pointer_target(slug_dir: Path) -> str:
     try:
         return (slug_dir / "current").read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
 
 
@@ -44,9 +44,17 @@ def published_metadata(slug_dir: Path) -> IndexMetadata | None:
         return None
     meta_path = slug_dir / (pointer.removesuffix(".db") + ".metadata.json")
     try:
-        return IndexMetadata.from_json(
-            json.loads(meta_path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, KeyError):
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        # UnicodeDecodeError ⊂ ValueError, listed for intent: unreadable
+        # bytes mean "no published snapshot", never a hard failure.
+        return None
+    if not isinstance(payload, dict):
+        return None  # same degradation contract as index_reader.read_metadata
+    try:
+        return IndexMetadata.from_json(payload)
+    except (ValueError, TypeError, KeyError):
+        # Includes non-int carry_depth payloads (int(...) raises).
         return None
 
 
