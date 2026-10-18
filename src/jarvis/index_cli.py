@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from jarvis import config
 from jarvis import jobs
 from jarvis import runtime
+from jarvis.carry import published_metadata
 from jarvis.graph import (
     GraphStore,
     clear_graph_edges_for_repo,
@@ -520,6 +521,21 @@ def _publish_atomically(target_dir: Path, versioned_name: str) -> None:
     tmp_pointer = target_dir / f".current.tmp-{os.getpid()}"
     tmp_pointer.write_text(versioned_name, encoding="utf-8")
     os.replace(tmp_pointer, pointer_file)
+
+
+def _noop_guard_hit(registry: Registry, slug: str, sha: str, source_hash: str,
+                    slug_dir: Path) -> bool:
+    """True when HEAD + source content + registry status are unchanged.
+
+    Spec: docs/features/incremental-reindex §B. Reads ONLY the published
+    pointer's metadata sibling (never a glob, so 0-byte scratch siblings
+    cannot masquerade) and the registry row. On a hit the caller returns
+    success with ZERO registry/pointer writes."""
+    meta = published_metadata(slug_dir)
+    if meta is None or meta.commit_sha != sha or meta.source_hash != source_hash:
+        return False
+    entry = registry.get(slug)
+    return entry is not None and entry.status == "indexed"
 
 
 def _metadata_name(db_filename: str) -> str:
@@ -1275,7 +1291,9 @@ def index_repo(
     watch: bool = False,
 ) -> str:
     """Runs the staged pipeline for one repo (spec TSI-04 §5 order) and
-    returns the slug it was published under.
+    returns the slug it was published under, or the literal string
+    `"unchanged"` when the no-op guard fired and nothing was published
+    (spec: docs/features/incremental-reindex §B).
 
     Stages and failure boundaries:
 
@@ -1421,15 +1439,6 @@ def _index_repo_locked(
     scip_supported = resolved_language in _INDEXER_BY_LANGUAGE
     attempt_scip = scip_enabled and scip_supported and not suppressed
 
-    # Transitional write: flips the row to `indexing` and persists the
-    # resolved enablement, while `scip_stage=None` leaves any prior stage
-    # failure record untouched for the decision below to read (spec
-    # TSI-06). Like --scheme/--language, an explicit enablement choice is
-    # persisted the moment the row exists, pre-pipeline failures included.
-    registry.upsert(slug, str(repo_path), resolved_language, None, "indexing",
-                    scheme_override=scheme, semantic_include=semantic_include,
-                    language_override=language_override, scip_enabled=scip_enabled)
-
     # Set the moment `_publish_atomically` flips the pointer. Everything
     # after that is registry bookkeeping and cleanup, never a degradation
     # path (spec TSI-04 §5 stage 7; WR-02 retained).
@@ -1441,6 +1450,28 @@ def _index_repo_locked(
 
             # -- Stage 2: capture + syntax baseline ----------------------
             manifest = capture_sources(repo_path, scratch)
+
+            # -- No-op guard (spec: incremental-reindex §B) --------------
+            # Fires the moment stage 2 yields the source hash -- after
+            # capture, before the previous snapshot is opened and before
+            # any SCIP suppression/attempt work. A hit returns success
+            # with ZERO registry/pointer writes, so the transitional
+            # `indexing` upsert waits until after this check.
+            if _noop_guard_hit(registry, slug, sha, manifest.source_hash,
+                               config.index_dir(slug, root)):
+                registry.close()
+                return "unchanged"
+
+            # Transitional write: flips the row to `indexing` and persists
+            # the resolved enablement. `scip_stage=None` leaves any prior
+            # stage failure record untouched (the suppression predicate
+            # above read it pre-write, spec TSI-06). Like --scheme/
+            # --language, an explicit enablement choice is persisted as
+            # soon as the pipeline commits to running past the no-op guard.
+            registry.upsert(slug, str(repo_path), resolved_language, None, "indexing",
+                            scheme_override=scheme, semantic_include=semantic_include,
+                            language_override=language_override, scip_enabled=scip_enabled)
+
             syntax_db = scratch / "syntax.db"
             previous = _open_previous_snapshot(slug, root)
             pool = ParserPool()
@@ -1753,6 +1784,14 @@ def _cmd_index(args: argparse.Namespace) -> int:
             jobs.BuildLockHeld, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if slug == "unchanged":
+        # No-op guard hit (spec: incremental-reindex §B): nothing was
+        # published and no registry state moved. Report it distinctly so
+        # scripts can tell "reindexed" from "already current", and skip
+        # the semantic-install offer below — nothing ran to offer about.
+        display = config.repo_slug(args.slug or Path(args.path).resolve().name)
+        print(f"[index] {display} unchanged")
+        return 0
     print(f"indexed {slug}")
     # SEMA-01/SEMA-02: the semantic-extra install offer. Post-publish by
     # design — the index is already live before anything interactive can
@@ -2088,12 +2127,15 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             # known-failing SCIP attempt at an unchanged commit is
             # skipped, with a diagnostic naming the retry command.
             # Debounce semantics are unchanged; watch.py stays pure.
-            index_repo(
+            outcome = index_repo(
                 repo_path, slug=slug, scheme=args.scheme, language=args.language,
                 scip=getattr(args, "scip", None),
                 semantic=getattr(args, "semantic", None) is not False, watch=True,
             )
-            print(f"[watch] {slug} reindexed")
+            if outcome == "unchanged":
+                print(f"[watch] {slug} unchanged")
+            else:
+                print(f"[watch] {slug} reindexed")
         except Exception as exc:
             # Broad on purpose: index_repo() can raise before its own
             # try/except is even entered (e.g. `_git_head()`'s subprocess

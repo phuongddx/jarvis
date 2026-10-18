@@ -3619,6 +3619,9 @@ def test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit(
 
     # Now the extra is present (no offer) and the user passes an explicit
     # include: the pipeline's prepare half must run with those prefixes.
+    # Fresh content first — an identical reindex is now a no-op guard hit
+    # (spec: incremental-reindex §B) and would never reach the stage.
+    _commit_change(tmp_path / slug)
     monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: False)
     prepare_calls: list = []
     finish_calls: list = []
@@ -3840,6 +3843,8 @@ def test_pipeline_no_scip_persists_the_reversible_choice(tmp_path: Path, monkeyp
         registry.close()
 
     # Omitted flag: the persisted choice wins — still no SCIP attempt.
+    # Fresh content so the run is not a no-op guard hit (spec §B).
+    _commit_change(repo_dir, "extra.py")
     steps = _syntax_only_mocks(monkeypatch)
     index_repo(repo_dir, slug="optout", root=data_root)
     assert not any(s.endswith(" index") for s in steps)
@@ -3851,6 +3856,8 @@ def test_pipeline_no_scip_persists_the_reversible_choice(tmp_path: Path, monkeyp
 
     # --scip re-enables: the SCIP stage runs again (convert is a tripwire
     # here, so the run degrades — the point is the attempt happened).
+    # Fresh content: an identical reindex is a no-op guard hit (spec §B).
+    _commit_change(repo_dir, "extra2.py")
     from jarvis.index_cli import IndexingError
 
     _scip_convert_mocks(
@@ -3914,7 +3921,10 @@ def test_pipeline_zoekt_failure_is_hard_and_publishes_nothing(
     target_dir = config.index_dir(slug, data_root)
     live_pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
 
-    # Second run: zoekt dies after the SCIP stage succeeded.
+    # Second run: zoekt dies after the SCIP stage succeeded. Fresh
+    # content so the run is not a no-op guard hit (spec §B) — the guard
+    # itself never reaches zoekt.
+    _commit_change(repo_dir)
     from jarvis.index_cli import MissingBinaryError
 
     def _run(cmd, *, cwd, step, env=None):
@@ -3959,7 +3969,9 @@ def test_pipeline_registry_failure_after_pointer_flip_reports_snapshot_live(
     target_dir = config.index_dir(slug, data_root)
     first_live = (target_dir / "current").read_text(encoding="utf-8").strip()
 
-    # Second run flips a new pointer, then the terminal registry write dies.
+    # Second run flips a new pointer, then the terminal registry write
+    # dies. Fresh content so the run is not a no-op guard hit (spec §B).
+    _commit_change(repo_dir)
     real_upsert = cli.Registry.upsert
 
     def _upsert_then_die(self, slug_arg, *a, **k):
@@ -3988,12 +4000,14 @@ def test_pipeline_registry_failure_after_pointer_flip_reports_snapshot_live(
 def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
     tmp_path: Path, monkeypatch
 ):
-    """Case 8 (snapshot safety + reuse): two runs at one commit produce
-    different immutable index-<commit>-<generation>.db filenames with
-    matching metadata stems; the reader cache invalidates by pointer
-    content; unchanged sources are carried forward without re-parse (the
-    second snapshot's rows come from reuse, and the generation id is still
-    unique)."""
+    """Case 8 (snapshot safety + reuse): a dirty-worktree reindex at one
+    commit produces a different immutable index-<commit>-<generation>.db
+    filename with a matching metadata stem; the reader cache invalidates
+    by pointer content; the unchanged sources carry forward without
+    re-parse (only the changed file re-parses; the generation id is still
+    unique). An IDENTICAL reindex at one commit is now a no-op guard hit
+    (spec: incremental-reindex §B) that publishes nothing, so the
+    distinct-generation property is exercised with changed content."""
     from jarvis.index_cli import index_repo
     from jarvis.index_reader import IndexConnectionCache
     from jarvis.syntax_index import read_snapshot_facts
@@ -4013,8 +4027,16 @@ def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
     conn_before, _ = config.get_connection(cache, slug)
     facts_before = read_snapshot_facts(conn_before)
 
+    # Same commit, dirty worktree: the guard compares sha AND source hash,
+    # so modified TRACKED bytes at one HEAD still publish a NEW generation
+    # while both filenames keep the same index-<commit>- prefix.
+    greeter = repo_dir / "greeter.py"
+    greeter.write_text(greeter.read_text(encoding="utf-8") + "\n\ndef shout(name: str) -> str:\n    return greet(name).upper()\n")
     index_repo(repo_dir, slug="reuser", root=data_root)
     second = (target_dir / "current").read_text(encoding="utf-8").strip()
+    head = _git_head_sha(repo_dir)
+    assert first.startswith(f"index-{head}-"), first
+    assert second.startswith(f"index-{head}-"), second
     assert first != second
     assert (target_dir / first).is_file() or True  # retired by cleanup
     assert (target_dir / second).is_file()
@@ -4025,7 +4047,7 @@ def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
     conn_after, _ = config.get_connection(cache, slug)
     facts_after = read_snapshot_facts(conn_after)
     assert facts_after.generation != facts_before.generation
-    assert facts_after.source_hash == facts_before.source_hash  # unchanged sources
+    assert facts_after.source_hash != facts_before.source_hash  # content changed
     assert facts_after.syntax_counts.parsed >= 1  # rows carried/reparsed live
     cache.close_all()
 
@@ -4961,3 +4983,114 @@ def test_install_semantic_reports_imports_unavailable_after_sync(
     assert rc == 1
     assert "lancedb" in captured.err
     assert "sentence_transformers" in captured.err
+
+
+def _publish_fake_snapshot(slug_dir, sha="abc", source_hash="shash"):
+    slug_dir.mkdir(parents=True, exist_ok=True)
+    (slug_dir / f"index-{sha}-1.db").touch()
+    (slug_dir / f"index-{sha}-1.metadata.json").write_text(json.dumps({
+        "project": "_", "repo": "demo", "branch": "_",
+        "commit_sha": sha, "source_hash": source_hash}))
+    (slug_dir / "current").write_text(f"index-{sha}-1.db")
+
+
+def _commit_change(repo_dir: Path, name: str = "extra.py") -> None:
+    """Commit one new tracked file, giving a follow-up index run fresh
+    content so the no-op guard (spec: incremental-reindex §B) misses and
+    the full pipeline runs."""
+    (repo_dir / name).write_text(f"# {name}\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"change {name}"], cwd=repo_dir, check=True)
+
+
+def test_noop_guard_contract(tmp_path):
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    slug_dir = tmp_path / "slug"
+    _publish_fake_snapshot(slug_dir)
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "indexed")
+        assert index_cli._noop_guard_hit(registry, "demo", "abc", "shash", slug_dir)
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "OTHER", slug_dir)
+        assert not index_cli._noop_guard_hit(registry, "demo", "def", "shash", slug_dir)
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "failed",
+                        status_origin="index", status_reason="boom")
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", slug_dir)
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash",
+                                             tmp_path / "missing")
+    finally:
+        registry.close()
+
+
+def test_index_repo_noop_returns_unchanged(tmp_path, monkeypatch):
+    """Pipeline-level: the guard fires after stage-2 capture, before SCIP;
+    a hit returns "unchanged" with zero registry/pointer writes."""
+    from jarvis import index_cli
+    from jarvis.syntax_index import capture_sources
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+
+    # Pre-publish a snapshot that matches the current HEAD + source hash,
+    # and mark the row indexed so every guard condition holds.
+    sha = index_cli._git_head(repo_dir)
+    manifest = capture_sources(repo_dir, tmp_path / "capture")
+    _publish_fake_snapshot(config.index_dir(slug, data_root),
+                           sha=sha, source_hash=manifest.source_hash)
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir.resolve()), "python", sha, "indexed")
+    finally:
+        registry.close()
+
+    def _fail_scip(*args, **kwargs):
+        raise AssertionError("SCIP ran on a no-op")
+
+    monkeypatch.setattr(index_cli, "_attempt_scip", _fail_scip)
+    # Anything AFTER the guard (zoekt, SCIP version gate, semantic prep)
+    # must also be unreachable; faking them keeps a guard regression a
+    # unit-safe, clearly attributed failure instead of a binary lookup.
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+    monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
+
+    result = index_repo(repo_dir, slug=slug, root=data_root)
+    assert result == "unchanged"
+
+    # Zero publication: pointer and generation set untouched, row still
+    # indexed, and no transitional status flip.
+    slug_dir = config.index_dir(slug, data_root)
+    assert (slug_dir / "current").read_text(encoding="utf-8").strip() \
+        == f"index-{sha}-1.db"
+    assert sorted(p.name for p in slug_dir.glob("index-*.db")) \
+        == [f"index-{sha}-1.db"]
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert entry is not None
+    assert entry.status == "indexed"
+    assert entry.commit_sha == sha
+
+
+def test_cmd_index_prints_unchanged_line_on_noop(tmp_path, monkeypatch, capsys):
+    """A no-op guard hit reports `unchanged`, never a fake `indexed` line,
+    and never reaches the semantic-install offer."""
+    import argparse
+
+    from jarvis import index_cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(index_cli, "index_repo", lambda *a, **k: "unchanged")
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: True)
+
+    rc = index_cli._cmd_index(argparse.Namespace(
+        path=str(tmp_path), slug=None, scheme=None, semantic_include=None,
+        language=None, scip=None, semantic=None, offer_semantic=True))
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.strip() == f"[index] {tmp_path.name} unchanged"
+    assert "Install semantic" not in captured.out
