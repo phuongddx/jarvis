@@ -122,7 +122,7 @@ Role `1` = definition (verified against live data: roles 0/1 only). Millisecond-
    );
    INSERT INTO carried_documents SELECT id, :prev_sha FROM documents;
    ```
-5. `UPDATE jarvis_snapshot` row: `scip_state='carried'`, counters recomputed over surviving rows (they are **carried-row counts**, not fresh counts — field names unchanged).
+5. `UPDATE jarvis_snapshot` row: `scip_state='carried'`; the per-stage capability columns are recomputed over surviving rows exactly as `finalize_snapshot` defines them for a carried generation (the schema's existing capability semantics — not new numeric counters).
 6. Continue at stage 4 (zoekt) with this DB as the SCIP artifact; stages 6-7 publish it under the new sha+generation exactly as a full run would.
 
 No symbol-ID remapping exists anywhere: there is no second fresh index to reconcile. Surviving `mentions.symbol_id` / `defn_enclosing_ranges.symbol_id` FKs keep their targets by construction.
