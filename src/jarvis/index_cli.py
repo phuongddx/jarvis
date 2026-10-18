@@ -1677,17 +1677,23 @@ def _index_repo_locked(
                             prev_conn.close()
 
                         # Empty diffs belong to B; A must never deepen a
-                        # carry when the no-op guard could not fire.
-                        decision = carry_mod.decide(
-                            prev_meta, doc_count, len(changed), len(closure))
-                        if not decision.carry and decision.reason in (
-                                carry_mod.FULL_REFRESH_REASONS):
-                            # A rejected watch carry falls through to the
-                            # full attempt below; publish WHY with this
-                            # exact generation. `no-previous` stays null —
-                            # a first index is not a refresh decision.
-                            full_refresh_reason = decision.reason
-                        if changed and decision.carry:
+                        # carry when the no-op guard could not fire, and a
+                        # decide() on an empty diff would only mislabel a
+                        # status-repair full run (spec A eligibility #4).
+                        decision = None
+                        if changed:
+                            decision = carry_mod.decide(
+                                prev_meta, doc_count, len(changed),
+                                len(closure))
+                            if not decision.carry and decision.reason in (
+                                    carry_mod.FULL_REFRESH_REASONS):
+                                # A rejected watch carry falls through to
+                                # the full attempt below; publish WHY with
+                                # this exact generation. `no-previous`
+                                # stays null — a first index is not a
+                                # refresh decision.
+                                full_refresh_reason = decision.reason
+                        if decision is not None and decision.carry:
                             carried_db = scratch / "carried.db"
                             prev_origin = (prev_meta.carried_from_sha
                                            or prev_meta.commit_sha)

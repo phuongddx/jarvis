@@ -5442,6 +5442,38 @@ def test_carry_threshold_gate_falls_through_to_full(tmp_path, monkeypatch):
     assert entry.scip_state == "available"
 
 
+def test_empty_diff_repair_run_publishes_no_full_refresh_reason(
+    tmp_path, monkeypatch,
+):
+    """An empty diff is B's job, never A's: when the no-op guard misses
+    only because the registry row is not `indexed`, the repair full run
+    must not borrow a depth-cap/threshold reason from a decide() call it
+    never earned."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    slug_dir = config.index_dir(slug, data_root)
+    _rewrite_current_metadata(slug_dir, {"carry_depth": 5})
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.mark_status(slug, "degraded")
+    finally:
+        registry.close()
+
+    # No content change: the guard misses on status alone. Empty diff,
+    # previous depth 5 — the old code labelled this "depth-cap".
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    metadata = _read_published_metadata(slug_dir)
+    assert metadata["full_refresh_reason"] is None
+    assert (metadata["scip_mode"], metadata["carry_depth"]) == \
+        ("available", 0)
+
+
 def test_unreadable_previous_snapshot_warns_and_falls_back(
     tmp_path, monkeypatch, capsys,
 ):
