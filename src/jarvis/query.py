@@ -74,6 +74,9 @@ class FreshnessSnapshot:
     generation: str | None = None
     # Snapshot-level SCIP carry provenance; None on full runs.
     scip_carried_from_sha: str | None = None
+    # Snapshot-level carry depth (same metadata as scip_carried_from_sha);
+    # None only when no snapshot metadata could be read.
+    scip_carry_depth: int | None = None
 
 
 def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
@@ -87,6 +90,7 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
             checked_at=checked_at,
             generation=None,
             scip_carried_from_sha=None,
+            scip_carry_depth=None,
         )
 
     generated_at: datetime | None = None
@@ -104,6 +108,7 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
         checked_at=checked_at,
         generation=metadata.generation,
         scip_carried_from_sha=metadata.carried_from_sha,
+        scip_carry_depth=metadata.carry_depth,
     )
 
 
@@ -915,6 +920,7 @@ class QueryService:
                 checked_at=snapshot.checked_at,
                 generation=snapshot.generation,
                 scip_carried_from_sha=snapshot.scip_carried_from_sha,
+                scip_carry_depth=snapshot.scip_carry_depth,
             ), carried_document_count, full_refresh_reason
 
         stale = snapshot.commit != live_head
@@ -926,6 +932,7 @@ class QueryService:
             checked_at=snapshot.checked_at,
             generation=snapshot.generation,
             scip_carried_from_sha=snapshot.scip_carried_from_sha,
+            scip_carry_depth=snapshot.scip_carry_depth,
         ), carried_document_count, full_refresh_reason
 
     def get_index_status(self, repo: str, repo_path: str | None = None) -> tuple[bool, FreshnessSnapshot]:

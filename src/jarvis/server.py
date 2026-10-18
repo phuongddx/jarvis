@@ -217,13 +217,23 @@ def _carry_fields(
     """SCIP carry provenance for a status payload. Freshness, count, and the
     persisted decision reason all arrive from ONE snapshot open
     (`QueryService.get_index_status_details`); the registry row only
-    contributes `scipMode` on a non-carried generation and `carryDepth`.
+    contributes `scipMode` on a non-carried generation and `carryDepth`
+    as a last-resort fallback. `carryDepth` is the LIVE generation's
+    metadata depth — pairing a new snapshot with a registry row from a
+    different run would misreport provenance.
     `fullRefreshReason` is constrained to the spec enum and is meaningful
     only on a full generation — a carried generation has no full-refresh
     decision to describe. Never raises: a status response must survive a
     broken registry."""
     carried = freshness.scip_carried_from_sha if freshness is not None else None
+    snapshot_depth = (
+        freshness.scip_carry_depth if freshness is not None else None
+    )
     entry = _registry_entry(repo)
+    if snapshot_depth is not None:
+        carry_depth: int = snapshot_depth
+    else:
+        carry_depth = entry.scip_carry_depth if entry is not None else 0
     if carried is not None:
         reason: str | None = None
     else:
@@ -236,7 +246,7 @@ def _carry_fields(
             entry.scip_state if entry is not None else "unknown"
         ),
         "carriedFromSha": carried,
-        "carryDepth": entry.scip_carry_depth if entry is not None else 0,
+        "carryDepth": carry_depth,
         "carriedDocumentCount": carried_document_count,
         "fullRefreshReason": reason,
     }

@@ -425,7 +425,8 @@ def test_get_index_status_reports_none_status_when_never_registered():
 
 def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
     """A carried freshness snapshot labels the status carried, with
-    provenance sourced from the registry row plus the live sidecar count;
+    provenance sourced from the snapshot metadata plus the live sidecar
+    count; `fullRefreshReason` stays explicitly None on carried rows because a
     `fullRefreshReason` stays explicitly None on carried rows because a
     carried generation had no failed full attempt."""
     from datetime import UTC, datetime
@@ -448,6 +449,7 @@ def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
                 freshness=Freshness.FRESH,
                 checked_at=datetime.now(UTC),
                 scip_carried_from_sha="prev000",
+                scip_carry_depth=1,
             ), self.carried_document_count, self.full_refresh_reason
 
     monkeypatch.setattr(server, "_query_service", _CarriedStub())
@@ -470,6 +472,56 @@ def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
     assert payload["carryDepth"] == 1
     assert payload["carriedDocumentCount"] == 0  # no live SCIP db on disk
     assert payload["fullRefreshReason"] is None
+
+
+def test_get_index_status_carry_depth_follows_the_live_snapshot(
+    tmp_path: Path, monkeypatch,
+):
+    """carryDepth is the LIVE generation's metadata depth, never the
+    latest-run registry depth: the two stores can diverge during a pointer
+    flip or after failed preservation (spec: getIndexStatus flat fields)."""
+    from datetime import UTC, datetime
+
+    from jarvis.query import Freshness, FreshnessSnapshot
+    from jarvis.registry import Registry, ScipStageFields
+
+    class _DepthStub:
+        def __init__(self, carried: bool):
+            self.carried = carried
+
+        def get_index_status_details(self, repo, repo_path=None):
+            return True, FreshnessSnapshot(
+                commit="abc123",
+                generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                stale=False,
+                freshness=Freshness.FRESH,
+                checked_at=datetime.now(UTC),
+                scip_carried_from_sha="prev000" if self.carried else None,
+                scip_carry_depth=3 if self.carried else 0,
+            ), 0, None
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert(
+            "demo", "/p", "python", "abc123", "indexed",
+            scip_stage=ScipStageFields(
+                state="failed", failure_reason="boom",
+                carried_from_sha="older-sha", carry_depth=9),
+        )
+    finally:
+        registry.close()
+
+    monkeypatch.setattr(server, "_query_service", _DepthStub(carried=True))
+    carried_payload = server.get_index_status(repo="demo")
+    assert carried_payload["carryDepth"] == 3
+    assert carried_payload["carriedFromSha"] == "prev000"
+
+    # A full generation published over an older carried run: depth 0 now,
+    # even though the registry still remembers the last carried depth 9.
+    monkeypatch.setattr(server, "_query_service", _DepthStub(carried=False))
+    full_payload = server.get_index_status(repo="demo")
+    assert full_payload["carryDepth"] == 0
 
 
 def test_get_index_status_full_run_reports_registry_mode_and_no_reason(
