@@ -5015,6 +5015,18 @@ def test_noop_guard_contract(tmp_path):
         assert index_cli._noop_guard_hit(registry, "demo", "abc", "shash", slug_dir)
         assert not index_cli._noop_guard_hit(registry, "demo", "abc", "OTHER", slug_dir)
         assert not index_cli._noop_guard_hit(registry, "demo", "def", "shash", slug_dir)
+        # Corrupt/missing metadata siblings fall through (spec §B's
+        # scratch/0-byte failure mode), never raise. Status is still
+        # "indexed" here, so the metadata alone decides these misses.
+        bad_meta = tmp_path / "bad-meta"
+        _publish_fake_snapshot(bad_meta)
+        (bad_meta / "index-abc-1.metadata.json").write_text("{corrupt",
+                                                            encoding="utf-8")
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", bad_meta)
+        ghost = tmp_path / "ghost"
+        ghost.mkdir()
+        (ghost / "current").write_text("index-abc-9.db", encoding="utf-8")
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", ghost)
         registry.upsert("demo", "/tmp/demo", "python", "abc", "failed",
                         status_origin="index", status_reason="boom")
         assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", slug_dir)
@@ -5048,6 +5060,10 @@ def test_index_repo_noop_returns_unchanged(tmp_path, monkeypatch):
     finally:
         registry.close()
 
+    slug_dir = config.index_dir(slug, data_root)
+    pointer_bytes = (slug_dir / "current").read_bytes()
+    snapshot_files = sorted(p.name for p in slug_dir.glob("index-*"))
+
     def _fail_scip(*args, **kwargs):
         raise AssertionError("SCIP ran on a no-op")
 
@@ -5059,14 +5075,28 @@ def test_index_repo_noop_returns_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
     monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
 
+    # Zero-writes boundary, proven not inferred: every registry write and
+    # the pointer flip must be unreachable on the no-op path, so a
+    # write-then-restore, a last_indexed/failure-field mutation, or a
+    # flip-and-restore all fail here instead of hiding in end state.
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("no-op guard must not write")
+
+    monkeypatch.setattr(Registry, "upsert", _forbidden)
+    monkeypatch.setattr(Registry, "mark_status", _forbidden)
+    monkeypatch.setattr(Registry, "record_failure", _forbidden)
+    monkeypatch.setattr(Registry, "mark_tracked_files", _forbidden)
+    monkeypatch.setattr(Registry, "mark_semantic_indexed", _forbidden)
+    monkeypatch.setattr(index_cli, "_publish_atomically", _forbidden)
+
     result = index_repo(repo_dir, slug=slug, root=data_root)
     assert result == "unchanged"
 
-    # Zero publication: pointer and generation set untouched, row still
-    # indexed, and no transitional status flip.
-    slug_dir = config.index_dir(slug, data_root)
-    assert (slug_dir / "current").read_text(encoding="utf-8").strip() \
-        == f"index-{sha}-1.db"
+    # Zero publication: pointer bytes and the versioned snapshot set are
+    # byte-/file-identical, and the row is still indexed with the same sha
+    # (assertions below read the row the spy proved was never rewritten).
+    assert (slug_dir / "current").read_bytes() == pointer_bytes
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == snapshot_files
     assert sorted(p.name for p in slug_dir.glob("index-*.db")) \
         == [f"index-{sha}-1.db"]
     entry = Registry(data_root / "registry.db").get(slug)
@@ -5094,3 +5124,96 @@ def test_cmd_index_prints_unchanged_line_on_noop(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert captured.out.strip() == f"[index] {tmp_path.name} unchanged"
     assert "Install semantic" not in captured.out
+
+
+def test_index_repo_corrupt_metadata_falls_through_to_full_run(
+    tmp_path, monkeypatch
+):
+    """Spec §B's scratch/0-byte failure mode at pipeline level: `current`
+    points at a snapshot whose metadata sibling is invalid JSON, so
+    `published_metadata()` is None, the guard MISSES, and the full
+    pipeline runs to a fresh publish (never "unchanged")."""
+    from jarvis import index_cli
+    from jarvis.syntax_index import capture_sources
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+
+    sha = index_cli._git_head(repo_dir)
+    manifest = capture_sources(repo_dir, tmp_path / "capture")
+    slug_dir = config.index_dir(slug, data_root)
+    _publish_fake_snapshot(slug_dir, sha=sha, source_hash=manifest.source_hash)
+    # Everything matches EXCEPT the metadata bytes are garbage: the guard
+    # must treat the published snapshot as unreadable, not as a hit.
+    (slug_dir / f"index-{sha}-1.metadata.json").write_text("{corrupt",
+                                                           encoding="utf-8")
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir.resolve()), "python", sha, "indexed")
+    finally:
+        registry.close()
+
+    # Post-guard seams, faked the way the neighbouring degrade test does
+    # (SCIP indexer fails -> exit-0 degraded) so a fall-through run still
+    # completes and publishes without real binaries.
+    def _run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            from jarvis.index_cli import IndexingError
+            raise IndexingError(f"{step} failed (simulated):\nexit 1")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+    monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
+
+    result = index_repo(repo_dir, slug=slug, root=data_root)
+    assert result == slug  # NOT "unchanged"
+
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    assert pointer != f"index-{sha}-1.db"
+    # Stage-7 cleanup retires the superseded fake snapshot; the fresh
+    # generation + metadata stem is the publish proof.
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == sorted([
+        pointer, pointer.removesuffix(".db") + ".metadata.json"])
+
+
+def test_cmd_watch_prints_unchanged_and_reindexed_lines_on_outcome(
+    tmp_path, monkeypatch, capsys
+):
+    """The watch driver reports a no-op tick as `[watch] <slug> unchanged`
+    and keeps `reindexed` for real publications (spec §B status line)."""
+    import itertools
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "quiet-repo"
+    repo_dir.mkdir()
+
+    monkeypatch.setattr(cli, "index_repo", lambda *a, **k: "unchanged")
+    args = cli.build_parser().parse_args(["watch", str(repo_dir), "--debounce", "0"])
+    rc = _drive_cmd_watch(
+        cli, monkeypatch, vars(args) | {"func": None, "command": "watch"},
+        sleep_results=itertools.chain(itertools.repeat(None, 5),
+                                      [KeyboardInterrupt()]),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"[watch] {repo_dir.name} unchanged" in out
+    assert "reindexed" not in out
+
+    # The non-noop branch stays intact.
+    monkeypatch.setattr(cli, "index_repo", lambda *a, **k: "quiet-repo")
+    rc = _drive_cmd_watch(
+        cli, monkeypatch, vars(args) | {"func": None, "command": "watch"},
+        sleep_results=itertools.chain(itertools.repeat(None, 5),
+                                      [KeyboardInterrupt()]),
+    )
+    assert rc == 0
+    out2 = capsys.readouterr().out
+    assert f"[watch] {repo_dir.name} reindexed" in out2
+    assert "unchanged" not in out2
