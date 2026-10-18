@@ -5105,6 +5105,88 @@ def test_index_repo_noop_returns_unchanged(tmp_path, monkeypatch):
     assert entry.commit_sha == sha
 
 
+def test_watch_reindex_carries_scip_rows(tmp_path, monkeypatch):
+    """A watch-only changed run filters the prior SCIP snapshot, records
+    provenance at depth 1, and refreshes syntax rows for the new capture."""
+    import sqlite3
+
+    from jarvis import index_cli
+    from jarvis.index_cli import ScipAttempt
+    from jarvis.syntax_index import _SYNTAX_SCHEMA
+    from tests.fixtures.carry_db import build_prev_snapshot
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    (repo_dir / "stable.py").write_text("value = 1\n")
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+
+    def _run(cmd, *, cwd, step, env=None):
+        return _fake_completed_process(cmd)
+
+    def _fake_scip(repo_path, language, scheme, name, scratch):
+        import zstandard
+
+        db = scratch / "fake-scip.db"
+        build_prev_snapshot(db)
+        conn = sqlite3.connect(db)
+        try:
+            # Converter chunks hold zstd-framed occurrence protobufs; the
+            # fixture's empty bytes are convenient for row-level carry tests
+            # but are not decodable by finalize_snapshot.
+            conn.execute("UPDATE chunks SET occurrences = ?",
+                         (zstandard.compress(b""),))
+            conn.executescript(
+                "DROP TABLE IF EXISTS syntax_symbols;"
+                "DROP TABLE IF EXISTS jarvis_snapshot;"
+                "DROP TABLE IF EXISTS syntax_files;"
+                + _SYNTAX_SCHEMA
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return ScipAttempt("available", db_path=db)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+    monkeypatch.setattr(index_cli, "_attempt_scip", _fake_scip)
+    monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
+
+    first_sha = index_cli._git_head(repo_dir)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    greeter = repo_dir / "greeter.py"
+    greeter.write_text(greeter.read_text() + "\n# changed comment\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "change"], cwd=repo_dir, check=True)
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_carried_from_sha,
+            entry.scip_carry_depth, entry.status) == \
+        ("carried", first_sha, 1, "indexed")
+
+    slug_dir = config.index_dir(slug, data_root)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    metadata = json.loads(
+        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+        .read_text(encoding="utf-8"))
+    assert (metadata["scip_mode"], metadata["carried_from_sha"],
+            metadata["carry_depth"]) == ("carried", first_sha, 1)
+    conn = sqlite3.connect(slug_dir / pointer)
+    try:
+        # The fixture SCIP docs are both unaffected by the real repo's
+        # changed greeter.py; both therefore retain provenance.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM syntax_files").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
 def test_cmd_index_prints_unchanged_line_on_noop(tmp_path, monkeypatch, capsys):
     """A no-op guard hit reports `unchanged`, never a fake `indexed` line,
     and never reaches the semantic-install offer."""
@@ -5217,3 +5299,72 @@ def test_cmd_watch_prints_unchanged_and_reindexed_lines_on_outcome(
     out2 = capsys.readouterr().out
     assert f"[watch] {repo_dir.name} reindexed" in out2
     assert "unchanged" not in out2
+
+
+def test_terminal_stage_fields_carried():
+    from jarvis.index_cli import ScipAttempt, _terminal_stage_fields
+
+    stage = _terminal_stage_fields(
+        ScipAttempt("carried"), True, "new111",
+        carry={"carried_from_sha": "prev000", "carry_depth": 2})
+    assert (stage.state, stage.carried_from_sha, stage.carry_depth) == \
+        ("carried", "prev000", 3)  # depth increments on each carry
+
+
+def test_terminal_stage_fields_available_resets_carry():
+    from jarvis.index_cli import ScipAttempt, _terminal_stage_fields
+
+    stage = _terminal_stage_fields(ScipAttempt("available"), True, "s", carry=None)
+    assert (stage.state, stage.carried_from_sha, stage.carry_depth) == \
+        ("available", None, 0)
+
+
+def test_terminal_stage_fields_preserves_existing_branches():
+    from jarvis.index_cli import ScipAttempt, _terminal_stage_fields
+
+    failed = _terminal_stage_fields(
+        ScipAttempt("failed", reason="bad index", stderr="boom"),
+        True, "s", carry=None,
+    )
+    assert (failed.state, failed.failure_reason, failed.failure_stderr,
+            failed.failed_at_sha) == ("failed", "bad index", "boom", "s")
+    assert _terminal_stage_fields(None, False, "s", None).state == "disabled"
+    assert _terminal_stage_fields(
+        None, True, "s", None, scip_supported=False,
+    ).state == "unsupported"
+    assert _terminal_stage_fields(
+        None, True, "s", None, suppressed=True,
+    ) is None
+
+
+def test_publish_metadata_payload_carry_fields():
+    from jarvis.index_cli import _publish_metadata_payload
+
+    p = _publish_metadata_payload(
+        slug="demo", sha="new111", published_at="t", generation="g1",
+        source_hash="sh", scip_mode="carried",
+        carried_from_sha="prev000", carry_depth=1)
+    assert p["scip_mode"] == "carried"
+    assert p["carried_from_sha"] == "prev000"
+    assert p["carry_depth"] == 1
+
+    full = _publish_metadata_payload(
+        slug="demo", sha="s", published_at="t", generation="g",
+        source_hash="sh", scip_mode="available",
+        carried_from_sha=None, carry_depth=0)
+    assert full["scip_mode"] == "available"
+
+
+def test_manifest_file_hashes_uses_captured_paths():
+    from jarvis.index_cli import _manifest_file_hashes
+    from jarvis.syntax_index import CapturedFile, SourceManifest
+
+    manifest = SourceManifest(
+        files=(
+            CapturedFile("a.py", "python", "ha", None, True, None),
+            CapturedFile("missing.txt", None, None, None, True,
+                         "unsupported extension"),
+        ),
+        source_hash="sh",
+    )
+    assert _manifest_file_hashes(manifest) == {"a.py": "ha"}

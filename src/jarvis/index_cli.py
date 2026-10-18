@@ -523,6 +523,74 @@ def _publish_atomically(target_dir: Path, versioned_name: str) -> None:
     os.replace(tmp_pointer, pointer_file)
 
 
+def _terminal_stage_fields(
+    attempt: ScipAttempt | None, scip_enabled: bool, sha: str,
+    carry: dict | None, *, scip_supported: bool | None = None,
+    suppressed: bool = False,
+) -> ScipStageFields | None:
+    """Post-publish stage decision, extracted for testability.
+
+    The two keyword options preserve the pre-extraction suppressed and
+    unsupported outcomes; `scip_supported` defaults to `scip_enabled`
+    only for direct helper tests, never for the pipeline call. A carried
+    branch records the previous run's stored depth plus one."""
+    supported = scip_enabled if scip_supported is None else scip_supported
+    if attempt is not None and attempt.state == "available":
+        return ScipStageFields(state="available")
+    if attempt is not None and attempt.state == "carried":
+        return ScipStageFields(
+            state="carried",
+            carried_from_sha=(carry or {}).get("carried_from_sha"),
+            carry_depth=int((carry or {}).get("carry_depth") or 0) + 1,
+        )
+    if attempt is not None:
+        return ScipStageFields(
+            state=attempt.state, failure_reason=attempt.reason,
+            failure_stderr=attempt.stderr, failed_at_sha=sha,
+        )
+    if suppressed:
+        # Preserve the prior failure/state columns for this run.
+        return None
+    if not scip_enabled:
+        return ScipStageFields(state="disabled")
+    if not supported:
+        return ScipStageFields(state="unsupported")
+    return ScipStageFields(state="unavailable")
+
+
+def _publish_metadata_payload(
+    *, slug: str, sha: str, published_at: str, generation: str,
+    source_hash: str, scip_mode: str, carried_from_sha: str | None,
+    carry_depth: int,
+) -> dict:
+    """Canonical stage-7 metadata payload, including SCIP provenance."""
+    return {
+        "project": config.PROJECT,
+        "repo": slug,
+        "branch": config.BRANCH,
+        "commit_sha": sha,
+        "published_at": published_at,
+        "generation": generation,
+        "source_hash": source_hash,
+        "scip_mode": scip_mode,
+        "carried_from_sha": carried_from_sha,
+        "carry_depth": carry_depth,
+    }
+
+
+def _manifest_file_hashes(manifest: SourceManifest) -> dict[str, str]:
+    """Paths represented in the previous snapshot's syntax-files table.
+
+    Capture records out-of-scope/unsupported entries without a digest;
+    they are absent from both sides of the carry diff and therefore do
+    not participate in changed-path detection."""
+    return {
+        captured.file_path: captured.file_hash
+        for captured in manifest.files
+        if captured.file_hash is not None
+    }
+
+
 def _noop_guard_hit(registry: Registry, slug: str, sha: str, source_hash: str,
                     slug_dir: Path) -> bool:
     """True when HEAD + source content + registry status are unchanged.
@@ -1535,9 +1603,80 @@ def _index_repo_locked(
 
             # -- Stage 3: optional SCIP enrichment -----------------------
             attempt: ScipAttempt | None = None
-            if attempt_scip:
-                attempt = _attempt_scip(repo_path, resolved_language, scheme,
-                                        slug, scratch)
+            carry_ctx: dict | None = None
+            if (watch and scip_enabled
+                    and resolved_language in _INDEXER_BY_LANGUAGE
+                    and not suppressed):
+                # Watch-only carry lane. Any unreadable previous snapshot
+                # or carry-query/build SQLite failure falls through to the
+                # normal full attempt below.
+                from jarvis import carry as carry_mod
+
+                slug_dir = config.index_dir(slug, root)
+                prev_meta = carry_mod.published_metadata(slug_dir)
+                prev_name = carry_mod.pointer_target(slug_dir)
+                prev_db = slug_dir / prev_name if prev_name else None
+                if (prev_meta is not None and prev_db is not None
+                        and prev_db.exists()):
+                    try:
+                        prev_conn = sqlite3.connect(
+                            f"file:{prev_db}?mode=ro&immutable=1", uri=True)
+                        try:
+                            doc_count = prev_conn.execute(
+                                "SELECT COUNT(*) FROM documents"
+                            ).fetchone()[0]
+                            changed = carry_mod.changed_paths(
+                                prev_conn, _manifest_file_hashes(manifest))
+                            closure = carry_mod.closure_paths(prev_conn, changed)
+                        finally:
+                            prev_conn.close()
+
+                        # Empty diffs belong to B; A must never deepen a
+                        # carry when the no-op guard could not fire.
+                        decision = carry_mod.decide(
+                            prev_meta, doc_count, len(changed), len(closure))
+                        if changed and decision.carry:
+                            carried_db = scratch / "carried.db"
+                            prev_origin = (prev_meta.carried_from_sha
+                                           or prev_meta.commit_sha)
+                            carry_mod.build_carried_snapshot(
+                                prev_db, carried_db, changed | closure,
+                                prev_origin,
+                            )
+
+                            # Stage 6 merges the fresh syntax baseline into
+                            # the SCIP artifact with INSERT (not upsert).
+                            # The copied snapshot contains the previous
+                            # generation's Jarvis-owned rows, so replace them
+                            # before the normal merge. Legacy snapshots with
+                            # no syntax tables fall through to full SCIP.
+                            carried_conn = sqlite3.connect(carried_db)
+                            try:
+                                if carried_conn.execute(
+                                    "SELECT 1 FROM sqlite_master WHERE "
+                                    "type='table' AND name='syntax_files'"
+                                ).fetchone() is not None:
+                                    carried_conn.execute("DELETE FROM syntax_files")
+                                    carried_conn.execute("DELETE FROM syntax_symbols")
+                                    carried_conn.commit()
+                            finally:
+                                carried_conn.close()
+
+                            attempt = ScipAttempt(
+                                "carried", db_path=carried_db)
+                            carry_ctx = {
+                                "carried_from_sha": prev_origin,
+                                "carry_depth": prev_meta.carry_depth,
+                            }
+                    except (sqlite3.Error, OSError):
+                        # Bad SQLite state or scratch-copy I/O must never
+                        # fail a watch run; the full attempt remains the
+                        # safe fallback.
+                        attempt = None
+
+            if attempt_scip and (attempt is None or attempt.state != "carried"):
+                attempt = _attempt_scip(
+                    repo_path, resolved_language, scheme, slug, scratch)
 
             # -- Stage 4: Zoekt (required; failure fails the run) --------
             zoekt_dir = config.data_dir(root) / ".zoekt"
@@ -1640,16 +1779,16 @@ def _index_repo_locked(
             target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy(final_db, target_dir / versioned_name)
+            scip_mode = attempt.state if attempt is not None else "unavailable"
+            carried_sha = carry_ctx["carried_from_sha"] if carry_ctx else None
+            carry_depth = (carry_ctx["carry_depth"] + 1) if carry_ctx else 0
             (target_dir / _metadata_name(versioned_name)).write_text(
-                json.dumps({
-                    "project": config.PROJECT,
-                    "repo": slug,
-                    "branch": config.BRANCH,
-                    "commit_sha": sha,
-                    "published_at": published_at,
-                    "generation": generation,
-                    "source_hash": manifest.source_hash,
-                }),
+                json.dumps(_publish_metadata_payload(
+                    slug=slug, sha=sha, published_at=published_at,
+                    generation=generation, source_hash=manifest.source_hash,
+                    scip_mode=scip_mode, carried_from_sha=carried_sha,
+                    carry_depth=carry_depth,
+                )),
                 encoding="utf-8",
             )
             _publish_atomically(target_dir, versioned_name)
@@ -1660,20 +1799,10 @@ def _index_repo_locked(
         # successful baseline bookkeeping can never erase an active SCIP
         # failure (narrowed D-04): successful enrichment clears its own
         # fields; a suppressed run passes None and preserves them.
-        if attempt is not None and attempt.state == "available":
-            stage = ScipStageFields(state="available")
-        elif attempt is not None:
-            stage = ScipStageFields(
-                state=attempt.state, failure_reason=attempt.reason,
-                failure_stderr=attempt.stderr, failed_at_sha=sha,
-            )
-        elif not scip_enabled:
-            stage = ScipStageFields(state="disabled")
-        elif not scip_supported:
-            stage = ScipStageFields(state="unsupported")
-        else:
-            # Suppressed: preserve the last failure fields and state.
-            stage = None
+        stage = _terminal_stage_fields(
+            attempt, scip_enabled, sha, carry_ctx,
+            scip_supported=scip_supported, suppressed=suppressed,
+        )
 
         if attempt is not None and attempt.state in ("failed", "unavailable"):
             final_status = DEGRADED_STATUS
@@ -1713,7 +1842,7 @@ def _index_repo_locked(
                 f"jarvis index {repo_path} --scip",
                 file=sys.stderr,
             )
-        elif attempt is not None and attempt.state != "available":
+        elif attempt is not None and attempt.state not in ("available", "carried"):
             print(
                 f"warning: {slug}: SCIP enrichment {attempt.state} — "
                 f"{attempt.reason}. The syntax baseline and search were "

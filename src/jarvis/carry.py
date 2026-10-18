@@ -48,7 +48,8 @@ def published_metadata(slug_dir: Path) -> IndexMetadata | None:
 def changed_paths(prev: sqlite3.Connection,
                   source_hashes: dict[str, str]) -> set[str]:
     """Stored-hash diffs from this capture + new captured paths."""
-    rows = prev.execute("SELECT path, file_hash FROM syntax_files").fetchall()
+    rows = prev.execute(
+        "SELECT file_path, file_hash FROM syntax_files").fetchall()
     stored = {path: digest for path, digest in rows}
     return ({p for p, d in rows if source_hashes.get(p) != d}
             | (set(source_hashes) - set(stored)))

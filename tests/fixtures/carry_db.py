@@ -24,7 +24,8 @@ def build_prev_snapshot(dest) -> None:
           format_version INTEGER, generation TEXT, commit_sha TEXT, published_at TEXT,
           source_hash TEXT, scip_state TEXT, scip_outlines INTEGER, scip_definitions INTEGER,
           scip_references INTEGER, scip_calls INTEGER, scip_types INTEGER, syntax_counts TEXT);
-        CREATE TABLE syntax_files (path TEXT PRIMARY KEY, file_hash TEXT NOT NULL);
+        CREATE TABLE syntax_files (
+          file_path TEXT PRIMARY KEY, file_hash TEXT NOT NULL);
         """)
         conn.executemany(
             "INSERT INTO documents (id, relative_path) VALUES (?, ?)",
