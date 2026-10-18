@@ -1,8 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.0] - 2026-10-19
+
+### Added
+
+- Incremental reindex: identical runs no-op with zero registry writes, and
+  `jarvis watch` skips the whole-project SCIP indexer by carrying forward
+  unaffected rows from the previous snapshot (closure-invalidated, depth
+  cap 5, closure >60% falls back to a full run). Carried results are
+  labeled end-to-end (metadata, registry, `FreshnessSnapshot`, per-result
+  `Location`, `getIndexStatus` fields `scipMode`/`carriedFromSha`/
+  `carryDepth`/`carriedDocumentCount`/`fullRefreshReason`). Failed full
+  runs preserve a live carried snapshot.
 
 ### Fixed
+
 
 - SCIP indexing of `src/`-layout Python repos now resolves imports from
   files outside `src/` (tests, scripts), so `findReferences`/`callHierarchy`
