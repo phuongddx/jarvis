@@ -672,3 +672,62 @@ def test_type_hierarchy_rejects_a_syntax_identifier_even_with_scip_coverage_else
     with pytest.raises(CapabilityUnavailableError) as excinfo:
         combined_service.type_hierarchy(REPO, syntax_id)
     assert excinfo.value.capability == "typeHierarchy"
+
+
+def test_freshness_snapshot_exposes_carried_sha():
+    from jarvis.index_reader import IndexMetadata
+    from jarvis.query import _freshness_snapshot
+
+    snap = _freshness_snapshot(
+        IndexMetadata(
+            project="_",
+            repo="d",
+            branch="_",
+            commit_sha="abc",
+            published_at=None,
+            scip_mode="carried",
+            carried_from_sha="prev000",
+            carry_depth=1,
+        )
+    )
+    assert snap.scip_carried_from_sha == "prev000"
+
+
+def test_freshness_snapshot_none_when_full():
+    from jarvis.index_reader import IndexMetadata
+    from jarvis.query import _freshness_snapshot
+
+    snap = _freshness_snapshot(
+        IndexMetadata(
+            project="_",
+            repo="d",
+            branch="_",
+            commit_sha="abc",
+            published_at=None,
+            scip_mode="available",
+        )
+    )
+    assert snap.scip_carried_from_sha is None
+
+
+def test_carried_sha_map_reads_sidecar(tmp_path):
+    import sqlite3
+
+    from jarvis.carry import build_carried_snapshot
+    from jarvis.query import _carried_sha_map
+    from tests.fixtures.carry_db import build_prev_snapshot
+
+    build_prev_snapshot(tmp_path / "prev.db")
+    build_carried_snapshot(
+        tmp_path / "prev.db",
+        tmp_path / "c.db",
+        drop={"a.py"},
+        prev_sha="prev000",
+    )
+    conn = sqlite3.connect(tmp_path / "c.db")
+    try:
+        assert _carried_sha_map(conn) == {2: "prev000"}  # b.py doc id
+        conn.execute("DROP TABLE carried_documents")
+        assert _carried_sha_map(conn) == {}
+    finally:
+        conn.close()

@@ -72,6 +72,8 @@ class FreshnessSnapshot:
     # generation id, reported separately from latest-run outcome so a
     # caller can tell which immutable snapshot actually answered.
     generation: str | None = None
+    # Snapshot-level SCIP carry provenance; None on full runs.
+    scip_carried_from_sha: str | None = None
 
 
 def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
@@ -84,6 +86,7 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
             freshness=Freshness.UNKNOWN,
             checked_at=checked_at,
             generation=None,
+            scip_carried_from_sha=None,
         )
 
     generated_at: datetime | None = None
@@ -100,7 +103,23 @@ def _freshness_snapshot(metadata: IndexMetadata | None) -> FreshnessSnapshot:
         freshness=Freshness.FRESH if generated_at is not None else Freshness.UNKNOWN,
         checked_at=checked_at,
         generation=metadata.generation,
+        scip_carried_from_sha=metadata.carried_from_sha,
     )
+
+
+def _carried_sha_map(conn: sqlite3.Connection) -> dict[int, str]:
+    """document_id -> carried_from_sha from the sidecar; {} when absent."""
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='carried_documents'"
+    ).fetchone()
+    if has is None:
+        return {}
+    return {
+        document_id: carried_from_sha
+        for document_id, carried_from_sha in conn.execute(
+            "SELECT document_id, carried_from_sha FROM carried_documents"
+        )
+    }
 
 
 def _git_head(repo_path: str) -> str | None:
@@ -119,7 +138,9 @@ def _git_head(repo_path: str) -> str | None:
     return result.stdout.strip() or None
 
 
-def _occurrence_to_location(path: str, occ: ScipOccurrence) -> Location:
+def _occurrence_to_location(
+    path: str, occ: ScipOccurrence, carried_from_sha: str | None = None
+) -> Location:
     start_line, start_char, end_line, end_char = scip_range_to_positions(occ.range)
     return Location(
         path=path,
@@ -127,14 +148,15 @@ def _occurrence_to_location(path: str, occ: ScipOccurrence) -> Location:
             start=Position(line=start_line, character=start_char),
             end=Position(line=end_line, character=end_char),
         ),
+        carried_from_sha=carried_from_sha,
     )
 
 
 def _occurrences_for_symbol(
     conn: sqlite3.Connection, symbol: str, role_bit: int | None = None
-) -> list[tuple[str, ScipOccurrence]]:
+) -> list[tuple[int, str, ScipOccurrence]]:
     sql = (
-        "SELECT DISTINCT c.id, d.relative_path, c.occurrences "
+        "SELECT DISTINCT d.id, c.id, d.relative_path, c.occurrences "
         "FROM mentions m "
         "JOIN global_symbols s ON s.id = m.symbol_id "
         "JOIN chunks c ON c.id = m.chunk_id "
@@ -149,11 +171,11 @@ def _occurrences_for_symbol(
 
     rows = conn.execute(sql, params).fetchall()
 
-    results: list[tuple[str, ScipOccurrence]] = []
-    for _chunk_id, relative_path, blob in rows:
+    results: list[tuple[int, str, ScipOccurrence]] = []
+    for document_id, _chunk_id, relative_path, blob in rows:
         for occ in decode_occurrences(blob):
             if occ.symbol == symbol:
-                results.append((relative_path, occ))
+                results.append((document_id, relative_path, occ))
     return results
 
 
@@ -238,7 +260,9 @@ def _innermost_enclosing_definition(
     return row[0], row[1], row[2]
 
 
-def _call_hierarchy_incoming(conn: sqlite3.Connection, symbol: str) -> list[CallHierarchyEntry]:
+def _call_hierarchy_incoming(
+    conn: sqlite3.Connection, symbol: str, carried_shas: dict[int, str]
+) -> list[CallHierarchyEntry]:
     entries: list[CallHierarchyEntry] = []
     for document_id, relative_path, occ in _occurrences_for_symbol_with_doc(conn, symbol):
         if occ.is_definition():
@@ -251,13 +275,17 @@ def _call_hierarchy_incoming(conn: sqlite3.Connection, symbol: str) -> list[Call
         entries.append(
             CallHierarchyEntry(
                 symbol=SymbolInfo(symbol=caller_symbol, displayName=display_name, kind=kind_name(kind)),
-                location=_occurrence_to_location(relative_path, occ),
+                location=_occurrence_to_location(
+                    relative_path, occ, carried_shas.get(document_id)
+                ),
             )
         )
     return entries
 
 
-def _call_hierarchy_outgoing(conn: sqlite3.Connection, symbol: str) -> list[CallHierarchyEntry]:
+def _call_hierarchy_outgoing(
+    conn: sqlite3.Connection, symbol: str, carried_shas: dict[int, str]
+) -> list[CallHierarchyEntry]:
     own_ranges = conn.execute(
         "SELECT r.document_id, r.start_line, r.end_line "
         "FROM defn_enclosing_ranges r JOIN global_symbols s ON s.id = r.symbol_id "
@@ -287,15 +315,19 @@ def _call_hierarchy_outgoing(conn: sqlite3.Connection, symbol: str) -> list[Call
                 entries.append(
                     CallHierarchyEntry(
                         symbol=_symbol_info(conn, occ.symbol),
-                        location=_occurrence_to_location(relative_path, occ),
+                        location=_occurrence_to_location(
+                            relative_path, occ, carried_shas.get(document_id)
+                        ),
                     )
                 )
     return entries
 
 
-def _resolve_symbol_location(conn: sqlite3.Connection, symbol: str) -> Location | None:
+def _resolve_symbol_location(
+    conn: sqlite3.Connection, symbol: str, carried_shas: dict[int, str]
+) -> Location | None:
     row = conn.execute(
-        "SELECT d.relative_path, r.start_line, r.start_char, r.end_line, r.end_char "
+        "SELECT d.id, d.relative_path, r.start_line, r.start_char, r.end_line, r.end_char "
         "FROM defn_enclosing_ranges r "
         "JOIN global_symbols s ON s.id = r.symbol_id "
         "JOIN documents d ON d.id = r.document_id "
@@ -303,21 +335,26 @@ def _resolve_symbol_location(conn: sqlite3.Connection, symbol: str) -> Location 
         (symbol,),
     ).fetchone()
     if row is not None:
-        path, start_line, start_char, end_line, end_char = row
+        document_id, path, start_line, start_char, end_line, end_char = row
         return Location(
             path=path,
             range=Range(
                 start=Position(line=start_line, character=start_char),
                 end=Position(line=end_line, character=end_char),
             ),
+            carried_from_sha=carried_shas.get(document_id),
         )
-    for _document_id, relative_path, occ in _occurrences_for_symbol_with_doc(conn, symbol):
+    for document_id, relative_path, occ in _occurrences_for_symbol_with_doc(conn, symbol):
         if occ.is_definition():
-            return _occurrence_to_location(relative_path, occ)
+            return _occurrence_to_location(
+                relative_path, occ, carried_shas.get(document_id)
+            )
     return None
 
 
-def _type_hierarchy_supertypes(conn: sqlite3.Connection, symbol: str) -> list[TypeHierarchyEntry]:
+def _type_hierarchy_supertypes(
+    conn: sqlite3.Connection, symbol: str, carried_shas: dict[int, str]
+) -> list[TypeHierarchyEntry]:
     row = conn.execute("SELECT relationships FROM global_symbols WHERE symbol = ?", (symbol,)).fetchone()
     if row is None or row[0] is None:
         return []
@@ -325,14 +362,16 @@ def _type_hierarchy_supertypes(conn: sqlite3.Connection, symbol: str) -> list[Ty
     for rel in decode_relationships(row[0]):
         if not (rel.is_implementation or rel.is_type_definition):
             continue
-        location = _resolve_symbol_location(conn, rel.symbol)
+        location = _resolve_symbol_location(conn, rel.symbol, carried_shas)
         if location is None:
             continue
         entries.append(TypeHierarchyEntry(symbol=_symbol_info(conn, rel.symbol), location=location))
     return entries
 
 
-def _type_hierarchy_subtypes(conn: sqlite3.Connection, symbol: str) -> list[TypeHierarchyEntry]:
+def _type_hierarchy_subtypes(
+    conn: sqlite3.Connection, symbol: str, carried_shas: dict[int, str]
+) -> list[TypeHierarchyEntry]:
     rows = conn.execute(
         "SELECT symbol, relationships FROM global_symbols WHERE relationships IS NOT NULL"
     ).fetchall()
@@ -340,7 +379,7 @@ def _type_hierarchy_subtypes(conn: sqlite3.Connection, symbol: str) -> list[Type
     for other_symbol, blob in rows:
         for rel in decode_relationships(blob):
             if rel.symbol == symbol and (rel.is_implementation or rel.is_type_definition):
-                location = _resolve_symbol_location(conn, other_symbol)
+                location = _resolve_symbol_location(conn, other_symbol, carried_shas)
                 if location is None:
                     continue
                 entries.append(TypeHierarchyEntry(symbol=_symbol_info(conn, other_symbol), location=location))
@@ -506,7 +545,9 @@ def _scip_document_symbols(conn: sqlite3.Connection, path: str) -> list[Document
     return sorted(entries.values(), key=lambda e: (e.range.start.line, e.range.start.character))
 
 
-def _genuine_scip_candidates(conn: sqlite3.Connection, query: str) -> list[symbols.Candidate]:
+def _genuine_scip_candidates(
+    conn: sqlite3.Connection, query: str, carried_shas: dict[int, str]
+) -> list[symbols.Candidate]:
     """Bare/qualified-name SCIP matches that actually have a real
     definition location (spec TSI-05 "genuine SCIP definition
     candidates") -- a `global_symbols` row with no definition occurrence
@@ -519,8 +560,10 @@ def _genuine_scip_candidates(conn: sqlite3.Connection, query: str) -> list[symbo
     for match in matches:
         locations = sorted(
             (
-                _occurrence_to_location(path, occ)
-                for path, occ in _occurrences_for_symbol(conn, match.symbol, role_bit=SymbolRoles.DEFINITION)
+                _occurrence_to_location(path, occ, carried_shas.get(document_id))
+                for document_id, path, occ in _occurrences_for_symbol(
+                    conn, match.symbol, role_bit=SymbolRoles.DEFINITION
+                )
                 if occ.is_definition()
             ),
             key=lambda loc: (loc.path, loc.range.start.line, loc.range.start.character),
@@ -584,9 +627,12 @@ class QueryService:
     def get_definitions(self, repo: str, symbol: str) -> tuple[list[Location], FreshnessSnapshot]:
         conn, metadata = get_connection(self._cache, repo)
         symbol = self._resolved(conn, symbol)
+        carried_shas = _carried_sha_map(conn)
         locations = [
-            _occurrence_to_location(path, occ)
-            for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=SymbolRoles.DEFINITION)
+            _occurrence_to_location(path, occ, carried_shas.get(document_id))
+            for document_id, path, occ in _occurrences_for_symbol(
+                conn, symbol, role_bit=SymbolRoles.DEFINITION
+            )
             if occ.is_definition()
         ]
         return locations, _freshness_snapshot(metadata)
@@ -622,8 +668,10 @@ class QueryService:
                 freshness=freshness,
             )
         resolved = self._resolved(conn, symbol)
+        carried_shas = _carried_sha_map(conn)
         locations = [
-            _occurrence_to_location(path, occ) for path, occ in _occurrences_for_symbol(conn, resolved, role_bit=None)
+            _occurrence_to_location(path, occ, carried_shas.get(document_id))
+            for document_id, path, occ in _occurrences_for_symbol(conn, resolved, role_bit=None)
         ]
         return resolved, locations, freshness
 
@@ -694,12 +742,15 @@ class QueryService:
             return symbol, [_syntax_location(sym)], freshness
 
         has_scip = syntax_index.has_scip_tables(conn)
+        carried_shas = _carried_sha_map(conn)
         if has_scip:
             row = conn.execute("SELECT symbol FROM global_symbols WHERE symbol = ?", (symbol,)).fetchone()
             if row is not None:
                 locations = [
-                    _occurrence_to_location(path, occ)
-                    for path, occ in _occurrences_for_symbol(conn, symbol, role_bit=SymbolRoles.DEFINITION)
+                    _occurrence_to_location(path, occ, carried_shas.get(document_id))
+                    for document_id, path, occ in _occurrences_for_symbol(
+                        conn, symbol, role_bit=SymbolRoles.DEFINITION
+                    )
                     if occ.is_definition()
                 ]
                 return symbol, locations, freshness
@@ -709,13 +760,17 @@ class QueryService:
             # today's bare-name behavior, SCIP only.
             resolved = self._resolved(conn, symbol)
             locations = [
-                _occurrence_to_location(path, occ)
-                for path, occ in _occurrences_for_symbol(conn, resolved, role_bit=SymbolRoles.DEFINITION)
+                _occurrence_to_location(path, occ, carried_shas.get(document_id))
+                for document_id, path, occ in _occurrences_for_symbol(
+                    conn, resolved, role_bit=SymbolRoles.DEFINITION
+                )
                 if occ.is_definition()
             ]
             return resolved, locations, freshness
 
-        combined = (_genuine_scip_candidates(conn, symbol) if has_scip else []) + _syntax_candidates(conn, symbol)
+        combined = (
+            _genuine_scip_candidates(conn, symbol, carried_shas) if has_scip else []
+        ) + _syntax_candidates(conn, symbol)
         if not combined:
             raise symbols.SymbolNotFoundError(
                 f"no symbol named {symbol!r} in this index (searched SCIP definitions and syntax declarations)"
@@ -758,8 +813,9 @@ class QueryService:
                 freshness=freshness,
             )
         resolved = self._resolved(conn, symbol)
-        incoming = _call_hierarchy_incoming(conn, resolved)
-        outgoing = _call_hierarchy_outgoing(conn, resolved)
+        carried_shas = _carried_sha_map(conn)
+        incoming = _call_hierarchy_incoming(conn, resolved, carried_shas)
+        outgoing = _call_hierarchy_outgoing(conn, resolved, carried_shas)
         return resolved, incoming, outgoing, freshness
 
     def type_hierarchy(
@@ -803,8 +859,9 @@ class QueryService:
                 freshness=freshness,
             )
         resolved = self._resolved(conn, symbol)
-        supertypes = _type_hierarchy_supertypes(conn, resolved)
-        subtypes = _type_hierarchy_subtypes(conn, resolved)
+        carried_shas = _carried_sha_map(conn)
+        supertypes = _type_hierarchy_supertypes(conn, resolved, carried_shas)
+        subtypes = _type_hierarchy_subtypes(conn, resolved, carried_shas)
         return resolved, supertypes, subtypes, freshness
 
     def get_index_status(self, repo: str, repo_path: str | None = None) -> tuple[bool, FreshnessSnapshot]:
@@ -831,6 +888,7 @@ class QueryService:
                 freshness=Freshness.UNKNOWN,
                 checked_at=snapshot.checked_at,
                 generation=snapshot.generation,
+                scip_carried_from_sha=snapshot.scip_carried_from_sha,
             )
 
         stale = snapshot.commit != live_head
@@ -841,4 +899,5 @@ class QueryService:
             freshness=Freshness.STALE if stale else Freshness.FRESH,
             checked_at=snapshot.checked_at,
             generation=snapshot.generation,
+            scip_carried_from_sha=snapshot.scip_carried_from_sha,
         )
