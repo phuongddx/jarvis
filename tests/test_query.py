@@ -731,3 +731,45 @@ def test_carried_sha_map_reads_sidecar(tmp_path):
         assert _carried_sha_map(conn) == {}
     finally:
         conn.close()
+
+
+def test_find_references_labels_carried_document_and_leaves_syntax_lane_none(tmp_path: Path):
+    """`findReferences` labels hits from the carried sidecar with its source
+    SHA; the uncarried SCIP lane and the syntax lane remain unlabeled."""
+    index_dir = build_combined_snapshot(tmp_path, config.PROJECT, REPO, config.BRANCH)
+    pointer = (index_dir / "current").read_text(encoding="utf-8")
+    db_path = index_dir / pointer
+    metadata_path = index_dir / (pointer.removesuffix(".db") + ".metadata.json")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE carried_documents ("
+            "document_id INTEGER PRIMARY KEY REFERENCES documents(id), "
+            "carried_from_sha TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO carried_documents (document_id, carried_from_sha) "
+            "SELECT id, 'prev000' FROM documents WHERE relative_path = ?",
+            (DOC_CONSTANTS,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["scip_mode"] = "carried"
+    metadata["carried_from_sha"] = "prev000"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    service = QueryService(IndexConnectionCache(str(tmp_path)))
+    _, locations, freshness = service.find_references(REPO, METHOD_SYMBOL)
+    by_path = {location.path: location for location in locations}
+    assert freshness.scip_carried_from_sha == "prev000"
+    assert by_path[DOC_CONSTANTS].carried_from_sha == "prev000"
+    assert by_path[DOC_GREETER].carried_from_sha is None
+
+    syntax_outline = service.get_document_symbols(REPO, "toy/extra.py")
+    syntax_id = syntax_outline.entries[0].symbol
+    _, syntax_locations, _ = service.resolve_definition(REPO, syntax_id)
+    assert syntax_locations[0].carried_from_sha is None
