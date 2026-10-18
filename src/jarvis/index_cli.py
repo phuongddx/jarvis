@@ -1779,10 +1779,18 @@ def _index_repo_locked(
             target_dir = config.index_dir(slug, root)
             current_meta = published_metadata(target_dir)
             preserve_carried = (
-                attempt is not None
-                and attempt.state in ("failed", "unavailable")
-                and current_meta is not None
+                current_meta is not None
                 and current_meta.scip_mode == "carried"
+                and (
+                    (attempt is not None
+                     and attempt.state in ("failed", "unavailable"))
+                    # A repeated suppressed tick at the same failed HEAD
+                    # skips the attempt entirely; it must not destroy the
+                    # preserved carried snapshot either (spec failure
+                    # model: pointer untouched while the carried snapshot
+                    # is the best live data).
+                    or suppressed
+                )
             )
             if not preserve_carried:
                 graph_store = GraphStore(config.data_dir(root) / "registry.db")
@@ -1809,6 +1817,20 @@ def _index_repo_locked(
                 attempt, scip_enabled, sha, carry_ctx,
                 scip_supported=scip_supported, suppressed=suppressed,
             )
+            if (preserve_carried and stage is not None
+                    and stage.state in ("failed", "unavailable")
+                    and current_meta is not None):
+                # The retained snapshot keeps its carried provenance; the
+                # failed attempt's registry record must describe the SAME
+                # live snapshot, not zero out what is still published.
+                stage = ScipStageFields(
+                    state=stage.state,
+                    failure_reason=stage.failure_reason,
+                    failure_stderr=stage.failure_stderr,
+                    failed_at_sha=stage.failed_at_sha,
+                    carried_from_sha=current_meta.carried_from_sha,
+                    carry_depth=current_meta.carry_depth,
+                )
             if stage is not None:
                 scip_mode = stage.state
             elif existing is not None and existing.scip_state:
@@ -1824,12 +1846,19 @@ def _index_repo_locked(
                 # pointer target while recording the failed stage attempt.
                 versioned_name = (target_dir / "current").read_text(
                     encoding="utf-8").strip()
-                print(
-                    f"warning: {slug}: full SCIP enrichment "
-                    f"{attempt.state}; preserving the current carried "
-                    "snapshot",
-                    file=sys.stderr,
-                )
+                if attempt is not None:
+                    print(
+                        f"warning: {slug}: full SCIP enrichment "
+                        f"{attempt.state}; preserving the current carried "
+                        "snapshot",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"note: {slug}: SCIP suppressed at this commit; "
+                        "preserving the current carried snapshot",
+                        file=sys.stderr,
+                    )
             else:
                 shutil.copy(final_db, target_dir / versioned_name)
                 carried_sha = carry_ctx["carried_from_sha"] if carry_ctx else None

@@ -5452,11 +5452,84 @@ def test_failed_full_run_preserves_carried_snapshot(
     entry = Registry(data_root / "registry.db").get(slug)
     assert (entry.scip_state, entry.scip_failure_reason, entry.status) == \
         ("failed", "indexer failed", "degraded")
+    # Registry provenance must equal the retained snapshot's metadata, or
+    # getStatus reports carriedFromSha=<sha> with a contradicting depth.
+    preserved_meta = _read_published_metadata(slug_dir)
+    assert (entry.scip_carried_from_sha, entry.scip_carry_depth) == \
+        (preserved_meta["carried_from_sha"], preserved_meta["carry_depth"])
     assert _read_published_metadata(slug_dir)["scip_mode"] == "carried"
     assert graph_calls == []  # retained snapshot keeps its existing graph.
     # Only the baseline used the helper boundary; the forced replacement is
     # the direct failure stub above, and the carried watch bypassed it.
     assert calls == [slug]
+
+
+def test_repeated_suppressed_tick_preserves_carried_snapshot(
+    tmp_path, monkeypatch,
+):
+    """Two-watch-tick regression: after a failed full run preserves the
+    carried snapshot, the next suppressed tick at the same HEAD must keep
+    pointer/metadata/artifacts untouched — routine repeat events must not
+    replace live precise navigation with a syntax-only generation."""
+    from jarvis import index_cli
+    from jarvis.index_cli import ScipAttempt
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+    _commit_repo_change(repo_dir, "carry")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    slug_dir = config.index_dir(slug, data_root)
+    # Force the next tick past carry eligibility while its metadata stays
+    # carried: this drives a FAILED full attempt (preserved), not a carry.
+    _rewrite_current_metadata(slug_dir, {"carry_depth": 5})
+    _commit_repo_change(repo_dir, "failed replacement")
+    monkeypatch.setattr(
+        index_cli, "_attempt_scip",
+        lambda *a, **k: ScipAttempt("failed", reason="indexer failed",
+                                    stderr="boom"))
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    pointer_bytes = (slug_dir / "current").read_bytes()
+    metadata_path = slug_dir / (pointer.removesuffix(".db") + ".metadata.json")
+    metadata_bytes = metadata_path.read_bytes()
+    snapshot_files = sorted(p.name for p in slug_dir.glob("index-*"))
+    graph_calls: list[str] = []
+    monkeypatch.setattr(
+        index_cli, "clear_graph_edges_for_repo",
+        lambda graph_store, graph_slug: graph_calls.append("clear"))
+    monkeypatch.setattr(
+        index_cli, "populate_graph_for_repo",
+        lambda graph_store, graph_slug, index_conn: graph_calls.append(
+            "populate"))
+
+    # Second watch tick, SAME HEAD: the SCIP attempt is suppressed, so
+    # preservation must also apply through the suppressed branch.
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    assert (slug_dir / "current").read_bytes() == pointer_bytes
+    assert metadata_path.read_bytes() == metadata_bytes
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == snapshot_files
+    meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert meta["scip_mode"] == "carried"
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_failure_reason, entry.status) == \
+        ("failed", "indexer failed", "degraded")
+    assert graph_calls == []
+    conn = sqlite3.connect(slug_dir / pointer)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 2
+    finally:
+        conn.close()
 
 
 def test_chained_carry_keeps_original_origin(tmp_path, monkeypatch):
