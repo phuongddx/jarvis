@@ -5394,6 +5394,19 @@ def test_failed_full_run_preserves_carried_snapshot(
     _commit_repo_change(repo_dir, "failed replacement")
     failure = ScipAttempt("failed", reason="indexer failed", stderr="boom")
     monkeypatch.setattr(index_cli, "_attempt_scip", lambda *a, **k: failure)
+    graph_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        index_cli,
+        "clear_graph_edges_for_repo",
+        lambda graph_store, graph_slug: graph_calls.append(("clear", graph_slug)),
+    )
+    monkeypatch.setattr(
+        index_cli,
+        "populate_graph_for_repo",
+        lambda graph_store, graph_slug, index_conn: graph_calls.append(
+            ("populate", graph_slug)
+        ),
+    )
 
     assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
                       watch=True) == slug
@@ -5404,6 +5417,7 @@ def test_failed_full_run_preserves_carried_snapshot(
     assert (entry.scip_state, entry.scip_failure_reason, entry.status) == \
         ("failed", "indexer failed", "degraded")
     assert _read_published_metadata(slug_dir)["scip_mode"] == "carried"
+    assert graph_calls == []  # retained snapshot keeps its existing graph.
     # Only the baseline used the helper boundary; the forced replacement is
     # the direct failure stub above, and the carried watch bypassed it.
     assert calls == [slug]

@@ -1767,22 +1767,31 @@ def _index_repo_locked(
                     conn.close()
                 has_nav = False
 
-            graph_store = GraphStore(config.data_dir(root) / "registry.db")
-            try:
-                if attempt is not None and attempt.db_path is not None:
-                    index_conn = sqlite3.connect(final_db)
-                    try:
-                        populate_graph_for_repo(graph_store, slug, index_conn)
-                    finally:
-                        index_conn.close()
-                else:
-                    # SCIP-less generation: rebuild-not-accumulate means the
-                    # repo's own outgoing edges are cleared, but package
-                    # identities other repos resolve against survive, and
-                    # nothing is synthesized from Tree-sitter (spec TSI-04).
-                    clear_graph_edges_for_repo(graph_store, slug)
-            finally:
-                graph_store.close()
+            target_dir = config.index_dir(slug, root)
+            current_meta = published_metadata(target_dir)
+            preserve_carried = (
+                attempt is not None
+                and attempt.state in ("failed", "unavailable")
+                and current_meta is not None
+                and current_meta.scip_mode == "carried"
+            )
+            if not preserve_carried:
+                graph_store = GraphStore(config.data_dir(root) / "registry.db")
+                try:
+                    if attempt is not None and attempt.db_path is not None:
+                        index_conn = sqlite3.connect(final_db)
+                        try:
+                            populate_graph_for_repo(graph_store, slug, index_conn)
+                        finally:
+                            index_conn.close()
+                    else:
+                        # SCIP-less generation: rebuild-not-accumulate means the
+                        # repo's own outgoing edges are cleared, but package
+                        # identities other repos resolve against survive, and
+                        # nothing is synthesized from Tree-sitter (spec TSI-04).
+                        clear_graph_edges_for_repo(graph_store, slug)
+                finally:
+                    graph_store.close()
 
             # Terminal stage decision before publication so the metadata
             # uses the exact state the registry is about to record. A
@@ -1799,15 +1808,7 @@ def _index_repo_locked(
                 scip_mode = "unavailable"
 
             # -- Stage 7: publish (scratch build -> unique names -> flip) -
-            target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)
-            current_meta = published_metadata(target_dir)
-            preserve_carried = (
-                attempt is not None
-                and attempt.state in ("failed", "unavailable")
-                and current_meta is not None
-                and current_meta.scip_mode == "carried"
-            )
             if preserve_carried:
                 # The scratch result is worse than the live precise index.
                 # Keep every published byte; cleanup below keeps this same
