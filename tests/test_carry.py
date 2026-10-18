@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+import pytest
+
 from tests.fixtures.carry_db import build_prev_snapshot
 
 
@@ -45,6 +47,39 @@ def test_closure_invalidates_referencing_docs(tmp_path):
     try:
         assert closure_paths(conn, {"a.py"}) == {"b.py"}  # b.py references A
         assert closure_paths(conn, {"b.py"}) == set()     # nothing references B
+    finally:
+        conn.close()
+
+
+def test_closure_matches_definition_role_bitmask(tmp_path):
+    """The raw ``mentions.role`` value is a SymbolRoles bitmask, not a 0/1
+    boolean (query.py contract): a Definition|Import (role 3) mention must
+    still seed closure, or dependents would be carried as stale."""
+    from jarvis.carry import closure_paths
+
+    build_prev_snapshot(tmp_path / "prev.db")
+    conn = sqlite3.connect(tmp_path / "prev.db")
+    try:
+        assert closure_paths(conn, {"a.py"}) == {"b.py"}
+    finally:
+        conn.close()
+
+
+def test_carried_snapshot_enforces_foreign_keys(tmp_path):
+    """The carried copy carries real FKs and is built with them enabled:
+    deleting a parent before its children must actually fail, and the
+    published copy must pass foreign_key_check."""
+    from jarvis.carry import build_carried_snapshot
+
+    build_prev_snapshot(tmp_path / "prev.db")
+    build_carried_snapshot(tmp_path / "prev.db", tmp_path / "c.db",
+                           drop={"a.py"}, prev_sha="prev000")
+    conn = sqlite3.connect(tmp_path / "c.db")
+    try:
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        conn.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM documents WHERE id = 2")
     finally:
         conn.close()
 

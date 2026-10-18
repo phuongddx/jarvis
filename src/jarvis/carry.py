@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jarvis.index_reader import IndexMetadata
+from jarvis.scip_decoder import SymbolRoles
 
 CARRY_DEPTH_CAP = 5
 CARRY_CLOSURE_THRESHOLD = 0.60
@@ -61,7 +62,9 @@ def changed_paths(prev: sqlite3.Connection,
 
 def closure_paths(prev: sqlite3.Connection, changed: set[str]) -> set[str]:
     """Docs mentioning any symbol DEFINED in `changed` docs. Outer join
-    is role-agnostic: any mention of a changed-file symbol stales a doc."""
+    is role-agnostic: any mention of a changed-file symbol stales a doc.
+    Definition detection uses the raw role BITMASK (query.py contract),
+    never exact equality."""
     if not changed:
         return set()
     marks = ",".join("?" * len(changed))
@@ -77,9 +80,9 @@ def closure_paths(prev: sqlite3.Connection, changed: set[str]) -> set[str]:
         f"WHERE m.symbol_id IN ("
         f"  SELECT m2.symbol_id FROM mentions m2 "
         f"  JOIN chunks c2 ON c2.id = m2.chunk_id "
-        f"  WHERE m2.role = 1 AND c2.document_id IN ({id_marks})"
+        f"  WHERE (m2.role & ?) != 0 AND c2.document_id IN ({id_marks})"
         f") AND c.document_id NOT IN ({id_marks})",
-        tuple(ids) * 2).fetchall()
+        (SymbolRoles.DEFINITION, *ids, *ids)).fetchall()
     return {
         prev.execute("SELECT relative_path FROM documents WHERE id = ?",
                      (doc_id,)).fetchone()[0]
@@ -109,6 +112,9 @@ def build_carried_snapshot(prev_db: Path, dest: Path, drop: set[str],
     shutil.copyfile(prev_db, dest)
     conn = sqlite3.connect(dest)
     try:
+        # Enforcement is per-connection in SQLite: without this, a wrong
+        # delete order below would corrupt silently instead of failing.
+        conn.execute("PRAGMA foreign_keys = ON")
         if drop:
             marks = ",".join("?" * len(drop))
             ids = [r[0] for r in conn.execute(
@@ -138,9 +144,12 @@ def build_carried_snapshot(prev_db: Path, dest: Path, drop: set[str],
         conn.execute(
             "UPDATE jarvis_snapshot SET scip_state = 'carried', "
             "scip_outlines = (SELECT COUNT(*) FROM documents), "
-            "scip_definitions = (SELECT COUNT(*) FROM mentions WHERE role = 1), "
-            "scip_references = (SELECT COUNT(*) FROM mentions WHERE role = 0), "
-            "scip_calls = 0, scip_types = 0")
+            "scip_definitions = (SELECT COUNT(*) FROM mentions "
+            "WHERE (role & ?) != 0), "
+            "scip_references = (SELECT COUNT(*) FROM mentions "
+            "WHERE (role & ?) = 0), "
+            "scip_calls = 0, scip_types = 0",
+            (SymbolRoles.DEFINITION, SymbolRoles.DEFINITION))
         conn.commit()
     finally:
         conn.close()
