@@ -40,6 +40,7 @@ class Location:
     # every pre-existing SCIP-only call site unchanged.
     source: str = "scip"
     positionEncoding: str | None = None
+    carried_from_sha: str | None = None
 
 
 @dataclass(frozen=True)

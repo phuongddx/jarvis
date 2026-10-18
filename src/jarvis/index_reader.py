@@ -57,6 +57,32 @@ class IndexMetadata:
     # they default to None -- old metadata stays fully readable.
     generation: str | None = None
     source_hash: str | None = None
+    # Carry-forward provenance (spec: incremental-reindex). Old writers
+    # never emit these keys; old metadata stays fully readable.
+    scip_mode: str | None = None
+    carried_from_sha: str | None = None
+    carry_depth: int = 0
+    # The watch-path carry decision that rejected the most recent full
+    # SCIP generation, when any (spec enum: not-carryable/depth-cap/
+    # threshold). Old writers never emit the key; a full index that was
+    # not a rejected carry, and any carried generation, leave it None.
+    full_refresh_reason: str | None = None
+
+    @classmethod
+    def from_json(cls, payload: dict) -> "IndexMetadata":
+        return cls(
+            project=payload["project"],
+            repo=payload["repo"],
+            branch=payload["branch"],
+            commit_sha=payload.get("commit_sha"),
+            published_at=payload.get("published_at"),
+            generation=payload.get("generation"),
+            source_hash=payload.get("source_hash"),
+            scip_mode=payload.get("scip_mode"),
+            carried_from_sha=payload.get("carried_from_sha"),
+            carry_depth=int(payload.get("carry_depth") or 0),
+            full_refresh_reason=payload.get("full_refresh_reason"),
+        )
 
 
 def _index_dir(filestore_root: str, project: str, repo: str, branch: str) -> Path:
@@ -96,15 +122,13 @@ def read_metadata(filestore_root: str, project: str, repo: str, branch: str, poi
         return None
     if not isinstance(raw, dict):
         return None
-    return IndexMetadata(
-        project=raw.get("project", project),
-        repo=raw.get("repo", repo),
-        branch=raw.get("branch", branch),
-        commit_sha=raw.get("commit_sha"),
-        published_at=raw.get("published_at"),
-        generation=raw.get("generation"),
-        source_hash=raw.get("source_hash"),
-    )
+    # Preserve the existing legacy-reader fallbacks for omitted coordinates;
+    # from_json itself represents the canonical metadata contract.
+    payload = dict(raw)
+    payload.setdefault("project", project)
+    payload.setdefault("repo", repo)
+    payload.setdefault("branch", branch)
+    return IndexMetadata.from_json(payload)
 
 
 class IndexConnectionCache:

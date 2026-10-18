@@ -860,3 +860,48 @@ def test_upsert_round_trips_status_stderr_and_plain_upsert_clears_it(tmp_path: P
         )
     finally:
         registry.close()
+
+
+def test_scip_states_include_carried():
+    from jarvis.registry import SCIP_STATES
+    assert "carried" in SCIP_STATES
+
+
+def test_upsert_carries_scip_carry_fields(tmp_path):
+    from jarvis.registry import Registry, ScipStageFields
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "indexed",
+                        scip_stage=ScipStageFields(
+                            state="carried", carried_from_sha="prev000", carry_depth=2))
+        row = registry.get("demo")
+        assert row.scip_state == "carried"
+        assert row.scip_carried_from_sha == "prev000"
+        assert row.scip_carry_depth == 2
+    finally:
+        registry.close()
+
+
+def test_upsert_rejects_composite_carried_state(tmp_path):
+    import pytest
+    from jarvis.registry import Registry, ScipStageFields
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        with pytest.raises(ValueError, match="invalid scip_state"):
+            registry.upsert("demo", "/tmp/demo", "python", "abc", "indexed",
+                            scip_stage=ScipStageFields(state="carried@abc"))
+    finally:
+        registry.close()
+
+
+def test_carry_columns_migrate_idempotently(tmp_path):
+    import sqlite3
+    from jarvis.registry import Registry
+    db = tmp_path / "registry.db"
+    Registry(db).close(); Registry(db).close()
+    conn = sqlite3.connect(db)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+    finally:
+        conn.close()
+    assert {"scip_carried_from_sha", "scip_carry_depth"} <= cols

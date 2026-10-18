@@ -40,7 +40,7 @@ ORIGIN_FALLBACK = "fallback"
 # normalization for historical rows with insufficient evidence; writers use
 # None (no attempt recorded) or one of the states below.
 SCIP_STATES = frozenset(
-    {"available", "partial", "failed", "unavailable", "unsupported", "disabled"}
+    {"available", "partial", "failed", "unavailable", "unsupported", "disabled", "carried"}
 )
 SCIP_UNKNOWN_STATE = "unknown"
 
@@ -89,7 +89,8 @@ _SELECT_COLUMNS = (
     "semantic_indexed_at, semantic_include, language_override, tracked_files, "
     "status_origin, status_reason, status_stderr, "
     "scip_enabled, scip_state, scip_failure_reason, scip_failure_stderr, "
-    "scip_failed_at_sha, semantic_declined"
+    "scip_failed_at_sha, scip_carried_from_sha, scip_carry_depth, "
+    "semantic_declined"
 )
 
 
@@ -210,7 +211,7 @@ def _join_include(prefixes: tuple[str, ...]) -> str | None:
 class ScipStageFields:
     """Stage-scoped SCIP fields for one terminal run decision (spec TSI-06).
 
-    `Registry.upsert` writes these four columns if and only if a
+    `Registry.upsert` writes these six columns if and only if a
     `ScipStageFields` is supplied, so a transitional `indexing` write (and
     any legacy-shaped upsert) can never erase a prior failure — the narrowed
     D-04 (spec §12): successful baseline bookkeeping cannot erase an active
@@ -221,6 +222,8 @@ class ScipStageFields:
     failure_reason: str | None = None
     failure_stderr: str | None = None
     failed_at_sha: str | None = None
+    carried_from_sha: str | None = None
+    carry_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -251,6 +254,8 @@ class RegisteredRepo:
     scip_failure_reason: str | None = None
     scip_failure_stderr: str | None = None
     scip_failed_at_sha: str | None = None
+    scip_carried_from_sha: str | None = None
+    scip_carry_depth: int = 0
     # Semantic-install decline memory (SEMA-01): 1 = user declined the
     # offer; NULL = never asked. No tri-state — NULL reads False.
     semantic_declined: bool = False
@@ -271,7 +276,8 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
      scheme_override, semantic_indexed_at, semantic_include, language_override,
      tracked_files, status_origin, status_reason, status_stderr,
      scip_enabled, scip_state, scip_failure_reason, scip_failure_stderr,
-     scip_failed_at_sha, semantic_declined) = row
+     scip_failed_at_sha, scip_carried_from_sha, scip_carry_depth,
+     semantic_declined) = row
     return RegisteredRepo(
         slug=slug,
         path=path,
@@ -292,6 +298,8 @@ def _row_to_repo(row: tuple) -> RegisteredRepo:
         scip_failure_reason=scip_failure_reason,
         scip_failure_stderr=scip_failure_stderr,
         scip_failed_at_sha=scip_failed_at_sha,
+        scip_carried_from_sha=scip_carried_from_sha,
+        scip_carry_depth=scip_carry_depth,
         semantic_declined=bool(semantic_declined) if semantic_declined is not None else False,
     )
 
@@ -373,6 +381,8 @@ class Registry:
         _ensure_column(self._conn, "scip_failure_reason", "TEXT")
         _ensure_column(self._conn, "scip_failure_stderr", "TEXT")
         _ensure_column(self._conn, "scip_failed_at_sha", "TEXT")
+        _ensure_column(self._conn, "scip_carried_from_sha", "TEXT")
+        _ensure_column(self._conn, "scip_carry_depth", "INTEGER NOT NULL DEFAULT 0")
         # SEMA-01 decline memory. NULL = never answered (offer again);
         # written only via set_semantic_declined — never by upsert, whose
         # transitional `indexing` writes would NULL-reset it (the
@@ -460,8 +470,8 @@ class Registry:
                 "scheme_override, semantic_indexed_at, semantic_include, language_override, "
                 "status_origin, status_reason, status_stderr, "
                 "scip_state, scip_failure_reason, scip_failure_stderr, scip_failed_at_sha, "
-                "scip_enabled) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "scip_carried_from_sha, scip_carry_depth, scip_enabled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(slug) DO UPDATE SET "
                 "path=excluded.path, language=excluded.language, commit_sha=excluded.commit_sha, "
                 "last_indexed=excluded.last_indexed, status=excluded.status, "
@@ -473,11 +483,14 @@ class Registry:
                 "scip_failure_reason=excluded.scip_failure_reason, "
                 "scip_failure_stderr=excluded.scip_failure_stderr, "
                 "scip_failed_at_sha=excluded.scip_failed_at_sha, "
+                "scip_carried_from_sha=excluded.scip_carried_from_sha, "
+                "scip_carry_depth=excluded.scip_carry_depth, "
                 "scip_enabled=excluded.scip_enabled"
             )
             values = base_values + (
                 scip_stage.state, scip_stage.failure_reason,
                 scip_stage.failure_stderr, scip_stage.failed_at_sha,
+                scip_stage.carried_from_sha, scip_stage.carry_depth,
                 int(resolved_scip_enabled),
             )
         self._conn.execute(sql, values)
@@ -494,6 +507,10 @@ class Registry:
             scip_failure_reason=scip_stage.failure_reason if scip_stage is not None else None,
             scip_failure_stderr=scip_stage.failure_stderr if scip_stage is not None else None,
             scip_failed_at_sha=scip_stage.failed_at_sha if scip_stage is not None else None,
+            scip_carried_from_sha=(
+                scip_stage.carried_from_sha if scip_stage is not None else None
+            ),
+            scip_carry_depth=scip_stage.carry_depth if scip_stage is not None else 0,
         )
 
     def mark_status(self, slug: str, status: str) -> None:

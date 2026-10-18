@@ -1,9 +1,7 @@
 [project]
-# The plain `jarvis` name on PyPI is taken by an unrelated package, so the
-# distribution is published as `jarvis-mcp`. This MUST stay in sync with the
-# project name on the PyPI trusted publisher: if the two disagree, uploads
-# fail with "Non-user identities cannot create new projects" rather than
-# anything that names the real problem.
+# The distribution is `jarvis-mcp`: the plain `jarvis` name was already taken
+# on PyPI, and the native build pipeline still installs the project by this
+# distribution name.
 #
 # The import package, both CLIs, and the MCP server are all `jarvis` — only
 # the name you install differs.
@@ -43,11 +41,9 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
     "Typing :: Typed",
 ]
-# Capped below 3.15: the compiled-wheel matrix ([tool.cibuildwheel] below)
-# only builds cp312/cp313/cp314. An uncapped floor would let uv resolve 3.15
-# once that becomes its default managed interpreter, find no matching wheel
-# (there is no sdist to fall back to), and fail `uvx --from jarvis-mcp
-# jarvis-server` outright instead of picking a supported interpreter.
+# Capped below 3.15: CI and the native release builds only exercise 3.12 and
+# 3.13. An uncapped floor would let source installs resolve an untested
+# interpreter once 3.15 becomes uv's default managed interpreter.
 requires-python = ">=3.12,<3.15"
 dependencies = [
     # Capped below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp`, which
@@ -106,10 +102,10 @@ native = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jarvis-intelligence/jarvis-index"
-Repository = "https://github.com/jarvis-intelligence/jarvis-index"
-Issues = "https://github.com/jarvis-intelligence/jarvis-index/issues"
-Changelog = "https://pypi.org/project/jarvis-mcp/#history"
+Homepage = "https://github.com/phuongddx/jarvis"
+Repository = "https://github.com/phuongddx/jarvis"
+Issues = "https://github.com/phuongddx/jarvis/issues"
+Changelog = "https://github.com/phuongddx/jarvis/blob/main/CHANGELOG.md"
 
 [project.scripts]
 jarvis = "jarvis.index_cli:main"
@@ -135,8 +131,8 @@ package-dir = { "" = "src" }
 packages = ["jarvis"]
 
 [tool.setuptools.package-data]
-# Dashboard SPA assets ride in every wheel; check_wheel_contents.py
-# guards their presence at release time.
+# Dashboard SPA assets ride in every wheel; scripts/check_native_package.py
+# guards their presence in the standalone release archive.
 jarvis = ["dashboard_assets/*.html", "dashboard_assets/*.js", "dashboard_assets/*.css"]
 
 [tool.pytest.ini_options]
@@ -145,39 +141,3 @@ markers = [
     "integration: exercises real external binaries (scip-python, scip, zoekt-index)",
     "interactive_input: monkeypatches builtins.input/isatty for the semantic-offer TTY prompt",
 ]
-
-[tool.cibuildwheel]
-# cp312..cp314 x {linux x86_64/aarch64, macOS arm64/x86_64}; the build list
-# supplies the supported platforms. musllinux and Windows are
-# skipped -- setup.sh does not support them, so nothing could consume the
-# wheels. No sdist is ever built: platforms outside this matrix must fail
-# loudly rather than fall back to readable source.
-build = ["cp312-*", "cp313-*", "cp314-*"]
-skip = ["*-musllinux_*"]
-environment = { JARVIS_COMPILE = "1" }
-# The unit suite against the INSTALLED compiled wheel is the empirical gate
-# for Cython semantic fidelity (frozen dataclasses, `str | None`, ...). This
-# does NOT install the `semantic` extra -- pulling torch into 12 builds
-# across 4 runners (including an aarch64 container) would be expensive and
-# flaky -- so tests gated behind `pytest.importorskip("lancedb")` skip here.
-# The grammar providers are base dependencies (tree-sitter cutover, spec
-# TSI-02), so real-parser tests now run inside these wheel builds; only
-# semantic-extra coverage remains skipped. Full-extras compiled-wheel
-# coverage is not yet automated.
-test-requires = ["pytest>=8.3"]
-# test_setup_sh.py is excluded: it tests the repo's bootstrap script, not the
-# wheel, and it hard-requires dash (its own first test guards on that), which
-# manylinux containers do not ship. Proven the hard way: v0.6.0's first
-# publish run failed exactly there, inside the cp312 manylinux test phase.
-#
-# interactive_input-marked tests are excluded too: cibuildwheel's isolated
-# --test-command subprocess does not give pytest a real, monkeypatch-honoring
-# stdin the way the regular unit-test job's interpreter does, so
-# `builtins.input` replacement in these tests intermittently loses the race
-# to pytest's own capture-mode stdin guard (`OSError: pytest: reading from
-# stdin while output is captured!`). Proven the hard way: v0.7.0's first
-# publish run failed exactly there, on every platform in the matrix. The
-# regular unit job (test.yml) already exercises these tests successfully on
-# every push, so no real coverage is lost -- only the compiled-wheel smoke
-# pass narrows.
-test-command = "pytest {project}/tests -m 'not integration and not interactive_input' -q --ignore={project}/tests/test_setup_sh.py"

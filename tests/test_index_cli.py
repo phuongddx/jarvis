@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from jarvis import config
+from jarvis import index_cli
 from jarvis.index_cli import PARTIAL_STATUS, UnsupportedLanguageError, detect_language, index_repo
 from jarvis.registry import Registry
 
@@ -3619,6 +3620,9 @@ def test_cmd_index_semantic_include_runs_on_declined_repo_without_clearing_bit(
 
     # Now the extra is present (no offer) and the user passes an explicit
     # include: the pipeline's prepare half must run with those prefixes.
+    # Fresh content first — an identical reindex is now a no-op guard hit
+    # (spec: incremental-reindex §B) and would never reach the stage.
+    _commit_change(tmp_path / slug)
     monkeypatch.setattr("jarvis.index_cli._semantic_extra_missing", lambda: False)
     prepare_calls: list = []
     finish_calls: list = []
@@ -3840,6 +3844,8 @@ def test_pipeline_no_scip_persists_the_reversible_choice(tmp_path: Path, monkeyp
         registry.close()
 
     # Omitted flag: the persisted choice wins — still no SCIP attempt.
+    # Fresh content so the run is not a no-op guard hit (spec §B).
+    _commit_change(repo_dir, "extra.py")
     steps = _syntax_only_mocks(monkeypatch)
     index_repo(repo_dir, slug="optout", root=data_root)
     assert not any(s.endswith(" index") for s in steps)
@@ -3851,6 +3857,8 @@ def test_pipeline_no_scip_persists_the_reversible_choice(tmp_path: Path, monkeyp
 
     # --scip re-enables: the SCIP stage runs again (convert is a tripwire
     # here, so the run degrades — the point is the attempt happened).
+    # Fresh content: an identical reindex is a no-op guard hit (spec §B).
+    _commit_change(repo_dir, "extra2.py")
     from jarvis.index_cli import IndexingError
 
     _scip_convert_mocks(
@@ -3914,7 +3922,10 @@ def test_pipeline_zoekt_failure_is_hard_and_publishes_nothing(
     target_dir = config.index_dir(slug, data_root)
     live_pointer = (target_dir / "current").read_text(encoding="utf-8").strip()
 
-    # Second run: zoekt dies after the SCIP stage succeeded.
+    # Second run: zoekt dies after the SCIP stage succeeded. Fresh
+    # content so the run is not a no-op guard hit (spec §B) — the guard
+    # itself never reaches zoekt.
+    _commit_change(repo_dir)
     from jarvis.index_cli import MissingBinaryError
 
     def _run(cmd, *, cwd, step, env=None):
@@ -3959,7 +3970,9 @@ def test_pipeline_registry_failure_after_pointer_flip_reports_snapshot_live(
     target_dir = config.index_dir(slug, data_root)
     first_live = (target_dir / "current").read_text(encoding="utf-8").strip()
 
-    # Second run flips a new pointer, then the terminal registry write dies.
+    # Second run flips a new pointer, then the terminal registry write
+    # dies. Fresh content so the run is not a no-op guard hit (spec §B).
+    _commit_change(repo_dir)
     real_upsert = cli.Registry.upsert
 
     def _upsert_then_die(self, slug_arg, *a, **k):
@@ -3988,12 +4001,14 @@ def test_pipeline_registry_failure_after_pointer_flip_reports_snapshot_live(
 def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
     tmp_path: Path, monkeypatch
 ):
-    """Case 8 (snapshot safety + reuse): two runs at one commit produce
-    different immutable index-<commit>-<generation>.db filenames with
-    matching metadata stems; the reader cache invalidates by pointer
-    content; unchanged sources are carried forward without re-parse (the
-    second snapshot's rows come from reuse, and the generation id is still
-    unique)."""
+    """Case 8 (snapshot safety + reuse): a dirty-worktree reindex at one
+    commit produces a different immutable index-<commit>-<generation>.db
+    filename with a matching metadata stem; the reader cache invalidates
+    by pointer content; the unchanged sources carry forward without
+    re-parse (only the changed file re-parses; the generation id is still
+    unique). An IDENTICAL reindex at one commit is now a no-op guard hit
+    (spec: incremental-reindex §B) that publishes nothing, so the
+    distinct-generation property is exercised with changed content."""
     from jarvis.index_cli import index_repo
     from jarvis.index_reader import IndexConnectionCache
     from jarvis.syntax_index import read_snapshot_facts
@@ -4013,8 +4028,16 @@ def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
     conn_before, _ = config.get_connection(cache, slug)
     facts_before = read_snapshot_facts(conn_before)
 
+    # Same commit, dirty worktree: the guard compares sha AND source hash,
+    # so modified TRACKED bytes at one HEAD still publish a NEW generation
+    # while both filenames keep the same index-<commit>- prefix.
+    greeter = repo_dir / "greeter.py"
+    greeter.write_text(greeter.read_text(encoding="utf-8") + "\n\ndef shout(name: str) -> str:\n    return greet(name).upper()\n")
     index_repo(repo_dir, slug="reuser", root=data_root)
     second = (target_dir / "current").read_text(encoding="utf-8").strip()
+    head = _git_head_sha(repo_dir)
+    assert first.startswith(f"index-{head}-"), first
+    assert second.startswith(f"index-{head}-"), second
     assert first != second
     assert (target_dir / first).is_file() or True  # retired by cleanup
     assert (target_dir / second).is_file()
@@ -4025,7 +4048,7 @@ def test_pipeline_same_commit_reindex_produces_distinct_immutable_snapshots(
     conn_after, _ = config.get_connection(cache, slug)
     facts_after = read_snapshot_facts(conn_after)
     assert facts_after.generation != facts_before.generation
-    assert facts_after.source_hash == facts_before.source_hash  # unchanged sources
+    assert facts_after.source_hash != facts_before.source_hash  # content changed
     assert facts_after.syntax_counts.parsed >= 1  # rows carried/reparsed live
     cache.close_all()
 
@@ -4961,3 +4984,1023 @@ def test_install_semantic_reports_imports_unavailable_after_sync(
     assert rc == 1
     assert "lancedb" in captured.err
     assert "sentence_transformers" in captured.err
+
+
+def _publish_fake_snapshot(slug_dir, sha="abc", source_hash="shash"):
+    slug_dir.mkdir(parents=True, exist_ok=True)
+    (slug_dir / f"index-{sha}-1.db").touch()
+    (slug_dir / f"index-{sha}-1.metadata.json").write_text(json.dumps({
+        "project": "_", "repo": "demo", "branch": "_",
+        "commit_sha": sha, "source_hash": source_hash}))
+    (slug_dir / "current").write_text(f"index-{sha}-1.db")
+
+
+def _make_carry_repo(tmp_path: Path) -> Path:
+    """A two-file Python repo whose watch diff stays below carry threshold."""
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    (repo_dir / "stable.py").write_text("value = 1\n")
+    _init_git_repo(repo_dir)
+    return repo_dir
+
+
+def _install_carry_pipeline(monkeypatch, full_attempt=None) -> list[str]:
+    """Mock the external pipeline; return full SCIP attempt selectors.
+
+    `full_attempt` is either a ScipAttempt returned on every explicit full
+    run or a callable with `_attempt_scip`'s signature. Watch carries bypass
+    this boundary entirely."""
+    import sqlite3
+
+    from jarvis import index_cli
+    from jarvis.index_cli import ScipAttempt
+    from jarvis.syntax_index import _SYNTAX_SCHEMA
+    from tests.fixtures.carry_db import build_prev_snapshot
+
+    calls: list[str] = []
+
+    def _run(cmd, *, cwd, step, env=None):
+        return _fake_completed_process(cmd)
+
+    def _fake_scip(repo_path, language, scheme, name, scratch):
+        import zstandard
+
+        calls.append(name)
+        if isinstance(full_attempt, ScipAttempt):
+            return full_attempt
+        if callable(full_attempt):
+            return full_attempt(repo_path, language, scheme, name, scratch)
+
+        db = scratch / "fake-scip.db"
+        build_prev_snapshot(db)
+        conn = sqlite3.connect(db)
+        try:
+            # Converter chunks hold zstd-framed occurrence protobufs; the
+            # row-level carry fixture's empty bytes are not decodable by
+            # finalize_snapshot.
+            conn.execute("UPDATE chunks SET occurrences = ?",
+                         (zstandard.compress(b""),))
+            conn.executescript(
+                "DROP TABLE IF EXISTS syntax_symbols;"
+                "DROP TABLE IF EXISTS jarvis_snapshot;"
+                "DROP TABLE IF EXISTS syntax_files;"
+                + _SYNTAX_SCHEMA
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return ScipAttempt("available", db_path=db)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+    monkeypatch.setattr(index_cli, "_attempt_scip", _fake_scip)
+    monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
+    return calls
+
+
+def _commit_repo_change(repo_dir: Path, marker: str = "changed") -> None:
+    greeter = repo_dir / "greeter.py"
+    greeter.write_text(f"{greeter.read_text()}\n# {marker}\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", marker], cwd=repo_dir, check=True)
+
+
+def _read_published_metadata(slug_dir: Path) -> dict:
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    return json.loads(
+        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+        .read_text(encoding="utf-8"))
+
+
+def _rewrite_current_metadata(slug_dir: Path, changes: dict) -> None:
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    path = slug_dir / (pointer.removesuffix(".db") + ".metadata.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.update(changes)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _commit_change(repo_dir: Path, name: str = "extra.py") -> None:
+    """Commit one new tracked file, giving a follow-up index run fresh
+    content so the no-op guard (spec: incremental-reindex §B) misses and
+    the full pipeline runs."""
+    (repo_dir / name).write_text(f"# {name}\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"change {name}"], cwd=repo_dir, check=True)
+
+
+def test_noop_guard_contract(tmp_path):
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    slug_dir = tmp_path / "slug"
+    _publish_fake_snapshot(slug_dir)
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "indexed")
+        assert index_cli._noop_guard_hit(registry, "demo", "abc", "shash", slug_dir)
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "OTHER", slug_dir)
+        assert not index_cli._noop_guard_hit(registry, "demo", "def", "shash", slug_dir)
+        # Corrupt/missing metadata siblings fall through (spec §B's
+        # scratch/0-byte failure mode), never raise. Status is still
+        # "indexed" here, so the metadata alone decides these misses.
+        bad_meta = tmp_path / "bad-meta"
+        _publish_fake_snapshot(bad_meta)
+        (bad_meta / "index-abc-1.metadata.json").write_text("{corrupt",
+                                                            encoding="utf-8")
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", bad_meta)
+        ghost = tmp_path / "ghost"
+        ghost.mkdir()
+        (ghost / "current").write_text("index-abc-9.db", encoding="utf-8")
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", ghost)
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "failed",
+                        status_origin="index", status_reason="boom")
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash", slug_dir)
+        assert not index_cli._noop_guard_hit(registry, "demo", "abc", "shash",
+                                             tmp_path / "missing")
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize("differing_kwargs", [
+    {"explicit_scip": True},
+    {"explicit_language": "swift"},
+    {"explicit_scheme": "other-scheme"},
+    {"explicit_semantic_include": ("lib/",)},
+])
+def test_noop_guard_bypasses_explicit_config_changes(tmp_path, differing_kwargs):
+    """A no-op means "same content AND same requested configuration":
+    an explicit scip/language/scheme/semantic-include choice that differs
+    from the persisted effective configuration bypasses the guard, while
+    absent or equal choices keep the zero-write hit."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    slug_dir = tmp_path / "slug"
+    _publish_fake_snapshot(slug_dir)
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "indexed",
+                        scheme_override="semanticdb",
+                        semantic_include=("src/",),
+                        language_override="python",
+                        scip_enabled=False)
+        equal_kwargs = dict(explicit_scip=False,
+                            explicit_language="python",
+                            explicit_scheme="semanticdb",
+                            explicit_semantic_include=("src/",))
+        hit_kwargs = dict(equal_kwargs)
+        for key in differing_kwargs:
+            hit_kwargs.pop(key)
+        hit_kwargs.update({
+            key: None for key in differing_kwargs})
+        assert index_cli._noop_guard_hit(
+            registry, "demo", "abc", "shash", slug_dir, **hit_kwargs)
+        assert not index_cli._noop_guard_hit(
+            registry, "demo", "abc", "shash", slug_dir, **differing_kwargs)
+    finally:
+        registry.close()
+
+
+def test_index_repo_explicit_scip_bypasses_noop_guard(tmp_path, monkeypatch):
+    """`jarvis index --scip` on an identical snapshot published with SCIP
+    disabled must not return "unchanged": the full run re-enables and
+    persists the choice (spec §B + parked verdict 3)."""
+    from jarvis.syntax_index import capture_sources
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+    sha = index_cli._git_head(repo_dir)
+    manifest = capture_sources(repo_dir, tmp_path / "capture")
+    slug_dir = config.index_dir(slug, data_root)
+    _publish_fake_snapshot(slug_dir, sha=sha, source_hash=manifest.source_hash)
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir.resolve()), "python", sha,
+                        "indexed", scip_enabled=False)
+    finally:
+        registry.close()
+
+    _install_carry_pipeline(monkeypatch)
+    result = index_repo(repo_dir, slug=slug, root=data_root, scip=True,
+                        semantic=False)
+    assert result == slug  # NOT "unchanged"
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert entry is not None and entry.scip_enabled is True
+
+
+def test_index_repo_noop_returns_unchanged(tmp_path, monkeypatch):
+    """Pipeline-level: the guard fires after stage-2 capture, before SCIP;
+    a hit returns "unchanged" with zero registry/pointer writes."""
+    from jarvis import index_cli
+    from jarvis.syntax_index import capture_sources
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+
+    # Pre-publish a snapshot that matches the current HEAD + source hash,
+    # and mark the row indexed so every guard condition holds.
+    sha = index_cli._git_head(repo_dir)
+    manifest = capture_sources(repo_dir, tmp_path / "capture")
+    _publish_fake_snapshot(config.index_dir(slug, data_root),
+                           sha=sha, source_hash=manifest.source_hash)
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir.resolve()), "python", sha, "indexed")
+    finally:
+        registry.close()
+
+    slug_dir = config.index_dir(slug, data_root)
+    pointer_bytes = (slug_dir / "current").read_bytes()
+    snapshot_files = sorted(p.name for p in slug_dir.glob("index-*"))
+
+    def _fail_scip(*args, **kwargs):
+        raise AssertionError("SCIP ran on a no-op")
+
+    monkeypatch.setattr(index_cli, "_attempt_scip", _fail_scip)
+    # Anything AFTER the guard (zoekt, SCIP version gate, semantic prep)
+    # must also be unreachable; faking them keeps a guard regression a
+    # unit-safe, clearly attributed failure instead of a binary lookup.
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+    monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
+
+    # Zero-writes boundary, proven not inferred: every registry write and
+    # the pointer flip must be unreachable on the no-op path, so a
+    # write-then-restore, a last_indexed/failure-field mutation, or a
+    # flip-and-restore all fail here instead of hiding in end state.
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("no-op guard must not write")
+
+    monkeypatch.setattr(Registry, "upsert", _forbidden)
+    monkeypatch.setattr(Registry, "mark_status", _forbidden)
+    monkeypatch.setattr(Registry, "record_failure", _forbidden)
+    monkeypatch.setattr(Registry, "mark_tracked_files", _forbidden)
+    monkeypatch.setattr(Registry, "mark_semantic_indexed", _forbidden)
+    monkeypatch.setattr(index_cli, "_publish_atomically", _forbidden)
+
+    result = index_repo(repo_dir, slug=slug, root=data_root)
+    assert result == "unchanged"
+
+    # Zero publication: pointer bytes and the versioned snapshot set are
+    # byte-/file-identical, and the row is still indexed with the same sha
+    # (assertions below read the row the spy proved was never rewritten).
+    assert (slug_dir / "current").read_bytes() == pointer_bytes
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == snapshot_files
+    assert sorted(p.name for p in slug_dir.glob("index-*.db")) \
+        == [f"index-{sha}-1.db"]
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert entry is not None
+    assert entry.status == "indexed"
+    assert entry.commit_sha == sha
+
+
+def test_watch_reindex_carries_scip_rows(tmp_path, monkeypatch):
+    """A watch-only changed run filters the prior SCIP snapshot, records
+    provenance at depth 1, refreshes syntax rows, and a later explicit full
+    run resets both persisted carry representations."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+
+    first_sha = index_cli._git_head(repo_dir)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    _commit_repo_change(repo_dir, "carry")
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_carried_from_sha,
+            entry.scip_carry_depth, entry.status) == \
+        ("carried", first_sha, 1, "indexed")
+
+    slug_dir = config.index_dir(slug, data_root)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    metadata = json.loads(
+        (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+        .read_text(encoding="utf-8"))
+    assert (metadata["scip_mode"], metadata["carried_from_sha"],
+            metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("carried", first_sha, 1, None)
+    conn = sqlite3.connect(slug_dir / pointer)
+    try:
+        # The fixture SCIP docs are both unaffected by the real repo's
+        # changed greeter.py; both therefore retain provenance.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM syntax_files").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+    _commit_repo_change(repo_dir, "full reset")
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_carried_from_sha,
+            entry.scip_carry_depth) == ("available", None, 0)
+    metadata = _read_published_metadata(config.index_dir(slug, data_root))
+    assert (metadata["scip_mode"], metadata["carried_from_sha"],
+            metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("available", None, 0, None)
+
+
+@pytest.mark.parametrize("reason", [
+    "threshold", "depth-cap", "not-carryable", "no-previous"])
+def test_watch_rejection_reason_is_published_on_full_metadata(
+    tmp_path, monkeypatch, reason,
+):
+    """A watch run whose carry decision falls through to full SCIP publishes
+    THAT decision with its exact generation. `no-previous` stays null: a
+    first index is not a refresh decision (controller ruling)."""
+    from jarvis import carry as carry_mod
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    def _reject(prev_meta, prev_doc_count, changed_count, closure_count):
+        return carry_mod.CarryDecision(False, reason, prev_meta)
+
+    monkeypatch.setattr(carry_mod, "decide", _reject)
+    _commit_repo_change(repo_dir, f"reject: {reason}")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    metadata = _read_published_metadata(config.index_dir(slug, data_root))
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert metadata["scip_mode"] == "available"
+    assert metadata["full_refresh_reason"] == (
+        None if reason == "no-previous" else reason)
+    assert entry is not None and entry.scip_state == "available"
+
+
+def test_disabled_run_metadata_matches_registry(tmp_path, monkeypatch):
+    """The canonical snapshot mode is the persisted terminal stage state."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, scip=False,
+                      semantic=False) == slug
+    entry = Registry(data_root / "registry.db").get(slug)
+    metadata = _read_published_metadata(config.index_dir(slug, data_root))
+    assert entry.scip_state == "disabled"
+    assert metadata["scip_mode"] == entry.scip_state
+
+
+def test_unsupported_run_metadata_matches_registry(tmp_path, monkeypatch):
+    """Unsupported-language snapshots use the same canonical state value."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+
+    def _no_indexable_language(repo_path):
+        raise UnsupportedLanguageError(
+            f"no supported source files tracked under {repo_path}"
+        )
+
+    monkeypatch.setattr(index_cli, "detect_language", _no_indexable_language)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+    entry = Registry(data_root / "registry.db").get(slug)
+    metadata = _read_published_metadata(config.index_dir(slug, data_root))
+    assert entry.scip_state == "unsupported"
+    assert metadata["scip_mode"] == entry.scip_state
+
+
+@pytest.mark.parametrize("metadata_changes", [
+    {"scip_mode": "failed"},
+    {"carry_depth": 5},
+])
+def test_carry_decision_gates_fall_through_to_full(
+    tmp_path, monkeypatch, metadata_changes,
+):
+    """Carryable-state and depth-cap misses reach the full SCIP boundary."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    calls = _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+    _rewrite_current_metadata(config.index_dir(slug, data_root),
+                              metadata_changes)
+    _commit_repo_change(repo_dir, "gate")
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    assert len(calls) == 2
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_carry_depth) == ("available", 0)
+
+
+def test_carry_threshold_gate_falls_through_to_full(tmp_path, monkeypatch):
+    """An over-threshold decision reaches the normal full attempt boundary."""
+    import sqlite3
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    calls = _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    # Map the fixture's definer/reference docs onto the real changed and
+    # unchanged files: 2 affected / 2 previous = 100% > 60%.
+    slug_dir = config.index_dir(slug, data_root)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    conn = sqlite3.connect(slug_dir / pointer)
+    try:
+        conn.execute("UPDATE documents SET relative_path = 'greeter.py' "
+                     "WHERE id = 1")
+        conn.execute("UPDATE documents SET relative_path = 'stable.py' "
+                     "WHERE id = 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+    _commit_repo_change(repo_dir, "threshold")
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    assert len(calls) == 2
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert entry.scip_state == "available"
+
+
+def test_empty_diff_repair_run_publishes_no_full_refresh_reason(
+    tmp_path, monkeypatch,
+):
+    """An empty diff is B's job, never A's: when the no-op guard misses
+    only because the registry row is not `indexed`, the repair full run
+    must not borrow a depth-cap/threshold reason from a decide() call it
+    never earned."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    slug_dir = config.index_dir(slug, data_root)
+    _rewrite_current_metadata(slug_dir, {"carry_depth": 5})
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.mark_status(slug, "degraded")
+    finally:
+        registry.close()
+
+    # No content change: the guard misses on status alone. Empty diff,
+    # previous depth 5 — the old code labelled this "depth-cap".
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    metadata = _read_published_metadata(slug_dir)
+    assert metadata["full_refresh_reason"] is None
+    assert (metadata["scip_mode"], metadata["carry_depth"]) == \
+        ("available", 0)
+
+
+def test_unreadable_previous_snapshot_warns_and_falls_back(
+    tmp_path, monkeypatch, capsys,
+):
+    """SQLite carry failure is observable and degrades to a full run."""
+    import sqlite3
+    import jarvis.carry
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    calls = _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    def _corrupt(*args, **kwargs):
+        raise sqlite3.DatabaseError("previous snapshot unreadable")
+
+    monkeypatch.setattr(jarvis.carry, "changed_paths", _corrupt)
+    _commit_repo_change(repo_dir, "unreadable")
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    assert len(calls) == 2
+    captured = capsys.readouterr()
+    assert "previous SCIP snapshot unreadable" in captured.err
+    assert "previous snapshot unreadable" in captured.err
+
+
+def test_failed_full_run_preserves_carried_snapshot(
+    tmp_path, monkeypatch,
+):
+    """A failed replacement cannot destroy the better live carried index."""
+    from jarvis import index_cli
+    from jarvis.index_cli import ScipAttempt
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    calls = _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+    _commit_repo_change(repo_dir, "carry")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    slug_dir = config.index_dir(slug, data_root)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    pointer_bytes = (slug_dir / "current").read_bytes()
+    snapshot_files = sorted(p.name for p in slug_dir.glob("index-*"))
+    # Force the next watch tick past carry eligibility while keeping its
+    # metadata marked carried: this exactly exercises the failed full-run
+    # replacement path rather than another successful carry.
+    _rewrite_current_metadata(slug_dir, {"carry_depth": 5})
+    metadata_path = slug_dir / (pointer.removesuffix(".db") + ".metadata.json")
+    metadata_bytes = metadata_path.read_bytes()
+    _commit_repo_change(repo_dir, "failed replacement")
+    failure = ScipAttempt("failed", reason="indexer failed", stderr="boom")
+    monkeypatch.setattr(index_cli, "_attempt_scip", lambda *a, **k: failure)
+    graph_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        index_cli,
+        "clear_graph_edges_for_repo",
+        lambda graph_store, graph_slug: graph_calls.append(("clear", graph_slug)),
+    )
+    monkeypatch.setattr(
+        index_cli,
+        "populate_graph_for_repo",
+        lambda graph_store, graph_slug, index_conn: graph_calls.append(
+            ("populate", graph_slug)
+        ),
+    )
+
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    assert (slug_dir / "current").read_bytes() == pointer_bytes
+    assert metadata_path.read_bytes() == metadata_bytes
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == snapshot_files
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_failure_reason, entry.status) == \
+        ("failed", "indexer failed", "degraded")
+    # Registry provenance must equal the retained snapshot's metadata, or
+    # getStatus reports carriedFromSha=<sha> with a contradicting depth.
+    preserved_meta = _read_published_metadata(slug_dir)
+    assert (entry.scip_carried_from_sha, entry.scip_carry_depth) == \
+        (preserved_meta["carried_from_sha"], preserved_meta["carry_depth"])
+    assert _read_published_metadata(slug_dir)["scip_mode"] == "carried"
+    assert graph_calls == []  # retained snapshot keeps its existing graph.
+    # Only the baseline used the helper boundary; the forced replacement is
+    # the direct failure stub above, and the carried watch bypassed it.
+    assert calls == [slug]
+
+
+def test_repeated_suppressed_tick_preserves_carried_snapshot(
+    tmp_path, monkeypatch,
+):
+    """Two-watch-tick regression: after a failed full run preserves the
+    carried snapshot, the next suppressed tick at the same HEAD must keep
+    pointer/metadata/artifacts untouched — routine repeat events must not
+    replace live precise navigation with a syntax-only generation."""
+    from jarvis import index_cli
+    from jarvis.index_cli import ScipAttempt
+
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+    _commit_repo_change(repo_dir, "carry")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    slug_dir = config.index_dir(slug, data_root)
+    # Force the next tick past carry eligibility while its metadata stays
+    # carried: this drives a FAILED full attempt (preserved), not a carry.
+    _rewrite_current_metadata(slug_dir, {"carry_depth": 5})
+    _commit_repo_change(repo_dir, "failed replacement")
+    monkeypatch.setattr(
+        index_cli, "_attempt_scip",
+        lambda *a, **k: ScipAttempt("failed", reason="indexer failed",
+                                    stderr="boom"))
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    pointer_bytes = (slug_dir / "current").read_bytes()
+    metadata_path = slug_dir / (pointer.removesuffix(".db") + ".metadata.json")
+    metadata_bytes = metadata_path.read_bytes()
+    snapshot_files = sorted(p.name for p in slug_dir.glob("index-*"))
+    graph_calls: list[str] = []
+    monkeypatch.setattr(
+        index_cli, "clear_graph_edges_for_repo",
+        lambda graph_store, graph_slug: graph_calls.append("clear"))
+    monkeypatch.setattr(
+        index_cli, "populate_graph_for_repo",
+        lambda graph_store, graph_slug, index_conn: graph_calls.append(
+            "populate"))
+
+    # Second watch tick, SAME HEAD: the SCIP attempt is suppressed, so
+    # preservation must also apply through the suppressed branch.
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+
+    assert (slug_dir / "current").read_bytes() == pointer_bytes
+    assert metadata_path.read_bytes() == metadata_bytes
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == snapshot_files
+    meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert meta["scip_mode"] == "carried"
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_state, entry.scip_failure_reason, entry.status) == \
+        ("failed", "indexer failed", "degraded")
+    assert graph_calls == []
+    conn = sqlite3.connect(slug_dir / pointer)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_chained_carry_keeps_original_origin(tmp_path, monkeypatch):
+    """Carry provenance follows the origin, never the intermediate SHA."""
+    data_root = tmp_path / "data"
+    slug = "demo"
+    repo_dir = _make_carry_repo(tmp_path)
+    _install_carry_pipeline(monkeypatch)
+    origin_sha = index_cli._git_head(repo_dir)
+    assert index_repo(repo_dir, slug=slug, root=data_root,
+                      semantic=False) == slug
+
+    _commit_repo_change(repo_dir, "first carry")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    _commit_repo_change(repo_dir, "second carry")
+    assert index_repo(repo_dir, slug=slug, root=data_root, semantic=False,
+                      watch=True) == slug
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert (entry.scip_carried_from_sha, entry.scip_carry_depth) == \
+        (origin_sha, 2)
+    metadata = _read_published_metadata(config.index_dir(slug, data_root))
+    assert (metadata["carried_from_sha"], metadata["carry_depth"]) == \
+        (origin_sha, 2)
+
+
+def test_cmd_index_prints_unchanged_line_on_noop(tmp_path, monkeypatch, capsys):
+    """A no-op guard hit reports `unchanged`, never a fake `indexed` line,
+    and never reaches the semantic-install offer."""
+    import argparse
+
+    from jarvis import index_cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(index_cli, "index_repo", lambda *a, **k: "unchanged")
+    monkeypatch.setattr(index_cli, "_semantic_extra_missing", lambda: True)
+
+    rc = index_cli._cmd_index(argparse.Namespace(
+        path=str(tmp_path), slug=None, scheme=None, semantic_include=None,
+        language=None, scip=None, semantic=None, offer_semantic=True))
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.strip() == f"[index] {tmp_path.name} unchanged"
+    assert "Install semantic" not in captured.out
+
+
+def test_index_repo_corrupt_metadata_falls_through_to_full_run(
+    tmp_path, monkeypatch
+):
+    """Spec §B's scratch/0-byte failure mode at pipeline level: `current`
+    points at a snapshot whose metadata sibling is invalid JSON, so
+    `published_metadata()` is None, the guard MISSES, and the full
+    pipeline runs to a fresh publish (never "unchanged")."""
+    from jarvis import index_cli
+    from jarvis.syntax_index import capture_sources
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+
+    sha = index_cli._git_head(repo_dir)
+    manifest = capture_sources(repo_dir, tmp_path / "capture")
+    slug_dir = config.index_dir(slug, data_root)
+    _publish_fake_snapshot(slug_dir, sha=sha, source_hash=manifest.source_hash)
+    # Everything matches EXCEPT the metadata bytes are garbage: the guard
+    # must treat the published snapshot as unreadable, not as a hit.
+    (slug_dir / f"index-{sha}-1.metadata.json").write_text("{corrupt",
+                                                           encoding="utf-8")
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir.resolve()), "python", sha, "indexed")
+    finally:
+        registry.close()
+
+    # Post-guard seams, faked the way the neighbouring degrade test does
+    # (SCIP indexer fails -> exit-0 degraded) so a fall-through run still
+    # completes and publishes without real binaries.
+    def _run(cmd, *, cwd, step, env=None):
+        if step.endswith(" index"):
+            from jarvis.index_cli import IndexingError
+            raise IndexingError(f"{step} failed (simulated):\nexit 1")
+        return _fake_completed_process(cmd)
+
+    monkeypatch.setattr(index_cli, "_run", _run)
+    monkeypatch.setattr(index_cli, "check_scip_version", lambda: None)
+    monkeypatch.setattr(index_cli, "_prepare_semantic_stage", lambda *a, **k: None)
+    monkeypatch.setattr(index_cli, "_finish_semantic_stage", lambda *a, **k: False)
+
+    result = index_repo(repo_dir, slug=slug, root=data_root)
+    assert result == slug  # NOT "unchanged"
+
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    assert pointer != f"index-{sha}-1.db"
+    # Stage-7 cleanup retires the superseded fake snapshot; the fresh
+    # generation + metadata stem is the publish proof.
+    assert sorted(p.name for p in slug_dir.glob("index-*")) == sorted([
+        pointer, pointer.removesuffix(".db") + ".metadata.json"])
+
+
+def test_cmd_watch_prints_unchanged_and_reindexed_lines_on_outcome(
+    tmp_path, monkeypatch, capsys
+):
+    """The watch driver reports a no-op tick as `[watch] <slug> unchanged`
+    and keeps `reindexed` for real publications (spec §B status line)."""
+    import itertools
+
+    import jarvis.index_cli as cli
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    repo_dir = tmp_path / "quiet-repo"
+    repo_dir.mkdir()
+
+    monkeypatch.setattr(cli, "index_repo", lambda *a, **k: "unchanged")
+    args = cli.build_parser().parse_args(["watch", str(repo_dir), "--debounce", "0"])
+    rc = _drive_cmd_watch(
+        cli, monkeypatch, vars(args) | {"func": None, "command": "watch"},
+        sleep_results=itertools.chain(itertools.repeat(None, 5),
+                                      [KeyboardInterrupt()]),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"[watch] {repo_dir.name} unchanged" in out
+    assert "reindexed" not in out
+
+    # The non-noop branch stays intact.
+    monkeypatch.setattr(cli, "index_repo", lambda *a, **k: "quiet-repo")
+    rc = _drive_cmd_watch(
+        cli, monkeypatch, vars(args) | {"func": None, "command": "watch"},
+        sleep_results=itertools.chain(itertools.repeat(None, 5),
+                                      [KeyboardInterrupt()]),
+    )
+    assert rc == 0
+    out2 = capsys.readouterr().out
+    assert f"[watch] {repo_dir.name} reindexed" in out2
+    assert "unchanged" not in out2
+
+
+def test_terminal_stage_fields_carried():
+    from jarvis.index_cli import ScipAttempt, _terminal_stage_fields
+
+    stage = _terminal_stage_fields(
+        ScipAttempt("carried"), True, "new111",
+        carry={"carried_from_sha": "prev000", "carry_depth": 2})
+    assert (stage.state, stage.carried_from_sha, stage.carry_depth) == \
+        ("carried", "prev000", 3)  # depth increments on each carry
+
+
+def test_terminal_stage_fields_available_resets_carry():
+    from jarvis.index_cli import ScipAttempt, _terminal_stage_fields
+
+    stage = _terminal_stage_fields(ScipAttempt("available"), True, "s", carry=None)
+    assert (stage.state, stage.carried_from_sha, stage.carry_depth) == \
+        ("available", None, 0)
+
+
+def test_terminal_stage_fields_preserves_existing_branches():
+    from jarvis.index_cli import ScipAttempt, _terminal_stage_fields
+
+    failed = _terminal_stage_fields(
+        ScipAttempt("failed", reason="bad index", stderr="boom"),
+        True, "s", carry=None,
+    )
+    assert (failed.state, failed.failure_reason, failed.failure_stderr,
+            failed.failed_at_sha) == ("failed", "bad index", "boom", "s")
+    assert _terminal_stage_fields(None, False, "s", None).state == "disabled"
+    assert _terminal_stage_fields(
+        None, True, "s", None, scip_supported=False,
+    ).state == "unsupported"
+    assert _terminal_stage_fields(
+        None, True, "s", None, suppressed=True,
+    ) is None
+
+
+def test_publish_metadata_payload_carry_fields():
+    from jarvis.index_cli import _publish_metadata_payload
+
+    p = _publish_metadata_payload(
+        slug="demo", sha="new111", published_at="t", generation="g1",
+        source_hash="sh", scip_mode="carried",
+        carried_from_sha="prev000", carry_depth=1)
+    assert p["scip_mode"] == "carried"
+    assert p["carried_from_sha"] == "prev000"
+    assert p["carry_depth"] == 1
+    assert p["full_refresh_reason"] is None  # carries publish no decision
+
+    full = _publish_metadata_payload(
+        slug="demo", sha="s", published_at="t", generation="g",
+        source_hash="sh", scip_mode="available",
+        carried_from_sha=None, carry_depth=0,
+        full_refresh_reason="depth-cap")
+    assert full["scip_mode"] == "available"
+    assert full["full_refresh_reason"] == "depth-cap"
+
+
+def test_manifest_file_hashes_uses_captured_paths():
+    from jarvis.index_cli import _manifest_file_hashes
+    from jarvis.syntax_index import CapturedFile, SourceManifest
+
+    manifest = SourceManifest(
+        files=(
+            CapturedFile("a.py", "python", "ha", None, True, None),
+            CapturedFile("missing.txt", None, None, None, True,
+                         "unsupported extension"),
+        ),
+        source_hash="sh",
+    )
+    assert _manifest_file_hashes(manifest) == {"a.py": "ha"}
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
+    """Real-toolchain depth-cap cycle with eight independent SCIP
+    documents: each watch round changes a DIFFERENT leaf document, so
+    every diff stays a one-document carry — reasons stay null through
+    depth 5, then the sixth consecutive carry request runs full with
+    full_refresh_reason="depth-cap" and resets depth to 0 (spec: cap 5 /
+    sixth request full). The threshold gate has its own test below."""
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True, text=True)
+
+    leaves = [f"leaf{i}.py" for i in range(1, 8)]
+    (repo / "core.py").write_text(
+        "class Core:\n    def ping(self):\n        return 1\n")
+    for leaf in leaves:
+        (repo / leaf).write_text("from core import Core\nCore().ping()\n")
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("add", ".")
+    git("commit", "-qm", "initial")
+
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False) == "carrydemo"
+    reg = Registry(data_root / "registry.db")
+    try:
+        row = reg.get("carrydemo")
+        assert row is not None
+        assert (row.scip_state, row.scip_carry_depth) == ("available", 0)
+    finally:
+        reg.close()
+
+    slug_dir = config.index_dir("carrydemo", data_root)
+
+    def read_meta() -> dict:
+        pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+        return json.loads(
+            (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+            .read_text(encoding="utf-8"))
+
+    # Five consecutive carries, each a different survivor document.
+    for i, leaf in enumerate(leaves[:5], start=1):
+        (repo / leaf).write_text(
+            f"from core import Core\nCore().ping()\n# touched {i}\n")
+        git("add", ".")
+        git("commit", "-qm", f"touch {leaf}")
+        assert index_repo(repo, slug="carrydemo", root=data_root,
+                          semantic=False, watch=True) == "carrydemo"
+        metadata = read_meta()
+        assert (metadata["scip_mode"], metadata["carry_depth"],
+                metadata["full_refresh_reason"]) == ("carried", i, None)
+        if i == 1:
+            pointer = (slug_dir / "current").read_text(
+                encoding="utf-8").strip()
+            conn = sqlite3.connect(
+                f"file:{slug_dir / pointer}?mode=ro&immutable=1", uri=True)
+            try:
+                # Only the changed leaf was dropped: 7 independent
+                # documents survive, all carried with provenance.
+                assert conn.execute(
+                    "SELECT COUNT(*) FROM documents").fetchone()[0] == 7
+                assert conn.execute(
+                    "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 7
+            finally:
+                conn.close()
+
+    reg = Registry(data_root / "registry.db")
+    try:
+        row = reg.get("carrydemo")
+        assert row is not None
+        assert (row.scip_state, row.scip_carry_depth) == ("carried", 5)
+        assert row.scip_carried_from_sha is not None
+    finally:
+        reg.close()
+
+    # Sixth consecutive carry request: the depth cap forces a full run.
+    (repo / leaves[5]).write_text(
+        "from core import Core\nCore().ping()\n# touched 6\n")
+    git("add", ".")
+    git("commit", "-qm", f"touch {leaves[5]}")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
+    reg = Registry(data_root / "registry.db")
+    try:
+        row = reg.get("carrydemo")
+        assert row is not None
+        assert (row.scip_state, row.scip_carry_depth) == ("available", 0)
+        assert row.scip_carried_from_sha is None
+    finally:
+        reg.close()
+    metadata = read_meta()
+    assert (metadata["scip_mode"], metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("available", 0, "depth-cap")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_watch_carry_threshold_on_whole_snapshot_change(
+    tmp_path: Path, monkeypatch,
+):
+    """Real-toolchain threshold gate, kept separate from the depth-cap
+    cycle: after the first carry retires the only other document,
+    re-touching that same document changes 100% of the previous document
+    set, so the next watch tick is a threshold full run — never a carry."""
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True, text=True)
+
+    (repo / "core.py").write_text(
+        "class Core:\n    def ping(self):\n        return 1\n")
+    (repo / "b.py").write_text("from core import Core\nCore().ping()\n")
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("add", ".")
+    git("commit", "-qm", "initial")
+
+    slug_dir = config.index_dir("carrydemo", data_root)
+
+    def read_meta() -> dict:
+        pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+        return json.loads(
+            (slug_dir / (pointer.removesuffix(".db") + ".metadata.json"))
+            .read_text(encoding="utf-8"))
+
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False) == "carrydemo"
+
+    (repo / "b.py").write_text(
+        "from core import Core\nCore().ping()\n# touched\n")
+    git("add", ".")
+    git("commit", "-qm", "first touch")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
+    metadata = read_meta()
+    assert metadata["scip_mode"] == "carried"
+    assert metadata["carry_depth"] == 1
+
+    # 1 changed document / 1 surviving document = 100% > 60% threshold.
+    (repo / "b.py").write_text(
+        "from core import Core\nCore().ping()\n# touched again\n")
+    git("add", ".")
+    git("commit", "-qm", "second touch")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
+    metadata = read_meta()
+    assert (metadata["scip_mode"], metadata["carry_depth"],
+            metadata["full_refresh_reason"]) == ("available", 0, "threshold")

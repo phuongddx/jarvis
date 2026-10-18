@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 
 from jarvis import config, jobs, syntax, syntax_index
 from jarvis.graph import GraphStore, blast_radius
+from jarvis.carry import FULL_REFRESH_REASONS
 from jarvis.index_reader import IndexNotFoundError
 from jarvis.query import CapabilityUnavailableError, FreshnessSnapshot, QueryService
 from jarvis.registry import DEGRADED_STATUS, RegisteredRepo, origin_of, recovery_for
@@ -207,6 +208,48 @@ def _search_coverage_fields(repo: str) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"searchCoverage": None, "searchCoverageReason": str(exc)}
+
+
+def _carry_fields(
+    repo: str, freshness: FreshnessSnapshot | None,
+    carried_document_count: int, full_refresh_reason: str | None,
+) -> dict[str, Any]:
+    """SCIP carry provenance for a status payload. Freshness, count, and the
+    persisted decision reason all arrive from ONE snapshot open
+    (`QueryService.get_index_status_details`); the registry row only
+    contributes `scipMode` on a non-carried generation and `carryDepth`
+    as a last-resort fallback. `carryDepth` is the LIVE generation's
+    metadata depth — pairing a new snapshot with a registry row from a
+    different run would misreport provenance.
+    `fullRefreshReason` is constrained to the spec enum and is meaningful
+    only on a full generation — a carried generation has no full-refresh
+    decision to describe. Never raises: a status response must survive a
+    broken registry."""
+    carried = freshness.scip_carried_from_sha if freshness is not None else None
+    snapshot_depth = (
+        freshness.scip_carry_depth if freshness is not None else None
+    )
+    entry = _registry_entry(repo)
+    if snapshot_depth is not None:
+        carry_depth: int = snapshot_depth
+    else:
+        carry_depth = entry.scip_carry_depth if entry is not None else 0
+    if carried is not None:
+        reason: str | None = None
+    else:
+        reason = (
+            full_refresh_reason
+            if full_refresh_reason in FULL_REFRESH_REASONS else None
+        )
+    return {
+        "scipMode": "carried" if carried else (
+            entry.scip_state if entry is not None else "unknown"
+        ),
+        "carriedFromSha": carried,
+        "carryDepth": carry_depth,
+        "carriedDocumentCount": carried_document_count,
+        "fullRefreshReason": reason,
+    }
 
 
 def _ctags_available() -> bool:
@@ -613,7 +656,9 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
     `starting`, `running`, `failed-at-startup`, or `abandoned`. The first two
     mean keep polling; the last two are terminal."""
     try:
-        indexed, freshness = _service().get_index_status(repo, repo_path)
+        indexed, freshness, carried_count, refresh_reason = (
+            _service().get_index_status_details(repo, repo_path)
+        )
     except Exception as exc:
         return {"error": str(exc)}
     try:
@@ -622,8 +667,17 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         # Belt over `_capability_fields`' own never-raise: even a bug in the
         # helper must not kill the published status response.
         capability_fields = {"last_index_run": None, "capabilities": None}
+    try:
+        carry_fields = _carry_fields(
+            repo, freshness, carried_count, refresh_reason)
+    except Exception:
+        carry_fields = {
+            "scipMode": "unknown", "carriedFromSha": None, "carryDepth": 0,
+            "carriedDocumentCount": 0, "fullRefreshReason": None,
+        }
     return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
-            **_freshness_fields(freshness), **_search_coverage_fields(repo),
+            **carry_fields, **_freshness_fields(freshness),
+            **_search_coverage_fields(repo),
             **_indexing_fields(repo, indexed), **capability_fields}
 
 
