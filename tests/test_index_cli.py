@@ -5122,6 +5122,76 @@ def test_noop_guard_contract(tmp_path):
         registry.close()
 
 
+@pytest.mark.parametrize("differing_kwargs", [
+    {"explicit_scip": True},
+    {"explicit_language": "swift"},
+    {"explicit_scheme": "other-scheme"},
+    {"explicit_semantic_include": ("lib/",)},
+])
+def test_noop_guard_bypasses_explicit_config_changes(tmp_path, differing_kwargs):
+    """A no-op means "same content AND same requested configuration":
+    an explicit scip/language/scheme/semantic-include choice that differs
+    from the persisted effective configuration bypasses the guard, while
+    absent or equal choices keep the zero-write hit."""
+    from jarvis import index_cli
+    from jarvis.registry import Registry
+
+    slug_dir = tmp_path / "slug"
+    _publish_fake_snapshot(slug_dir)
+    registry = Registry(tmp_path / "registry.db")
+    try:
+        registry.upsert("demo", "/tmp/demo", "python", "abc", "indexed",
+                        scheme_override="semanticdb",
+                        semantic_include=("src/",),
+                        language_override="python",
+                        scip_enabled=False)
+        equal_kwargs = dict(explicit_scip=False,
+                            explicit_language="python",
+                            explicit_scheme="semanticdb",
+                            explicit_semantic_include=("src/",))
+        hit_kwargs = dict(equal_kwargs)
+        for key in differing_kwargs:
+            hit_kwargs.pop(key)
+        hit_kwargs.update({
+            key: None for key in differing_kwargs})
+        assert index_cli._noop_guard_hit(
+            registry, "demo", "abc", "shash", slug_dir, **hit_kwargs)
+        assert not index_cli._noop_guard_hit(
+            registry, "demo", "abc", "shash", slug_dir, **differing_kwargs)
+    finally:
+        registry.close()
+
+
+def test_index_repo_explicit_scip_bypasses_noop_guard(tmp_path, monkeypatch):
+    """`jarvis index --scip` on an identical snapshot published with SCIP
+    disabled must not return "unchanged": the full run re-enables and
+    persists the choice (spec §B + parked verdict 3)."""
+    from jarvis.syntax_index import capture_sources
+
+    repo_dir = tmp_path / "repo"
+    shutil.copytree(FIXTURE_REPO, repo_dir)
+    _init_git_repo(repo_dir)
+    data_root = tmp_path / "data"
+    slug = "demo"
+    sha = index_cli._git_head(repo_dir)
+    manifest = capture_sources(repo_dir, tmp_path / "capture")
+    slug_dir = config.index_dir(slug, data_root)
+    _publish_fake_snapshot(slug_dir, sha=sha, source_hash=manifest.source_hash)
+    registry = Registry(data_root / "registry.db")
+    try:
+        registry.upsert(slug, str(repo_dir.resolve()), "python", sha,
+                        "indexed", scip_enabled=False)
+    finally:
+        registry.close()
+
+    _install_carry_pipeline(monkeypatch)
+    result = index_repo(repo_dir, slug=slug, root=data_root, scip=True,
+                        semantic=False)
+    assert result == slug  # NOT "unchanged"
+    entry = Registry(data_root / "registry.db").get(slug)
+    assert entry is not None and entry.scip_enabled is True
+
+
 def test_index_repo_noop_returns_unchanged(tmp_path, monkeypatch):
     """Pipeline-level: the guard fires after stage-2 capture, before SCIP;
     a hit returns "unchanged" with zero registry/pointer writes."""

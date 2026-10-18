@@ -593,18 +593,55 @@ def _manifest_file_hashes(manifest: SourceManifest) -> dict[str, str]:
 
 
 def _noop_guard_hit(registry: Registry, slug: str, sha: str, source_hash: str,
-                    slug_dir: Path) -> bool:
-    """True when HEAD + source content + registry status are unchanged.
+                    slug_dir: Path, *, explicit_scip: bool | None = None,
+                    explicit_language: str | None = None,
+                    explicit_scheme: str | None = None,
+                    explicit_semantic_include: tuple[str, ...] | None = None,
+                    ) -> bool:
+    """True when HEAD + source content + requested configuration are
+    unchanged and the registry row is `indexed`.
 
     Spec: docs/features/incremental-reindex §B. Reads ONLY the published
     pointer's metadata sibling (never a glob, so 0-byte scratch siblings
     cannot masquerade) and the registry row. On a hit the caller returns
     success with ZERO registry/pointer writes."""
+    entry = registry.get(slug)
+    if _explicit_config_changed(
+            entry,
+            scip=explicit_scip, language=explicit_language,
+            scheme=explicit_scheme,
+            semantic_include=explicit_semantic_include):
+        return False
     meta = published_metadata(slug_dir)
     if meta is None or meta.commit_sha != sha or meta.source_hash != source_hash:
         return False
-    entry = registry.get(slug)
     return entry is not None and entry.status == "indexed"
+
+
+def _explicit_config_changed(
+        entry: RegisteredRepo | None, *, scip: bool | None,
+        language: str | None, scheme: str | None,
+        semantic_include: tuple[str, ...] | None,
+) -> bool:
+    """True when an explicit CLI choice differs from the persisted
+    effective configuration. The no-op guard means "same content AND same
+    requested configuration": `--scip` after a persisted `--no-scip`
+    snapshot (and likewise an overriding `--language`/`--scheme`/
+    `--semantic-include`) must run the full pipeline so the transitional
+    upsert can persist the choice. None/absent never counts as a change.
+    Registry-backed only — never a file read."""
+    if entry is None:
+        return False  # nothing persisted; the status check already misses
+    if scip is not None and scip != entry.scip_enabled:
+        return True
+    if language is not None and language != entry.language_override:
+        return True
+    if scheme is not None and scheme != entry.scheme_override:
+        return True
+    if semantic_include is not None and tuple(semantic_include) != (
+            entry.semantic_include):
+        return True
+    return False
 
 
 def _metadata_name(db_filename: str) -> str:
@@ -1460,6 +1497,7 @@ def _index_repo_locked(
     # in (spec TSI-07).
     explicit_language = language
     explicit_scheme = scheme
+    explicit_semantic_include = semantic_include
     try:
         language_override = _resolve_language(registry, slug, language)
         if language_override is not None:
@@ -1527,7 +1565,12 @@ def _index_repo_locked(
             # with ZERO registry/pointer writes, so the transitional
             # `indexing` upsert waits until after this check.
             if _noop_guard_hit(registry, slug, sha, manifest.source_hash,
-                               config.index_dir(slug, root)):
+                               config.index_dir(slug, root),
+                               explicit_scip=scip,
+                               explicit_language=explicit_language,
+                               explicit_scheme=explicit_scheme,
+                               explicit_semantic_include=(
+                                   explicit_semantic_include)):
                 registry.close()
                 return "unchanged"
 
