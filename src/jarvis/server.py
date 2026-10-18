@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from dataclasses import asdict
@@ -207,6 +208,65 @@ def _search_coverage_fields(repo: str) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"searchCoverage": None, "searchCoverageReason": str(exc)}
+
+
+def _carried_document_count(repo: str) -> int:
+    """How many SCIP documents the *currently published* generation carried
+    forward, straight from that snapshot's own sidecar table. Zero means
+    "not carried" (or no live snapshot); it is deliberately indistinguishable
+    from a legitimately empty carry — `scipMode` already carries that nuance.
+
+    Never raises: the pointer, table, and database can all legitimately be
+    absent (a full generation, a never-indexed repo, a publish race), and a
+    status probe must not turn any of those into an error.
+    """
+    try:
+        index_dir = config.index_dir(repo)
+        pointer = index_dir / "current"
+        if not pointer.is_file():
+            return 0
+        name = pointer.read_text(encoding="utf-8").strip()
+        if not name:
+            return 0
+        db_path = index_dir / name
+        if not db_path.is_file():
+            return 0
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+        try:
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='carried_documents'"
+            ).fetchone()
+            if has_table is None:
+                return 0
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM carried_documents"
+            ).fetchone()[0])
+        finally:
+            conn.close()
+    except Exception:  # Broad on purpose: same never-raise contract as above.
+        return 0
+
+
+def _carry_fields(repo: str, freshness: FreshnessSnapshot | None) -> dict[str, Any]:
+    """SCIP carry provenance for a status payload. `freshness` is the live
+    snapshot's evidence — authoritative for "this generation is carried";
+    the registry row contributes depth and the recorded full-refresh reason.
+    Never raises: a status response must survive a broken registry or disk."""
+    carried = freshness.scip_carried_from_sha if freshness is not None else None
+    entry = _registry_entry(repo)
+    return {
+        "scipMode": "carried" if carried else (
+            entry.scip_state if entry is not None else "unknown"
+        ),
+        "carriedFromSha": carried,
+        "carryDepth": entry.scip_carry_depth if entry is not None else 0,
+        "carriedDocumentCount": _carried_document_count(repo),
+        "fullRefreshReason": (
+            entry.status_reason
+            if entry is not None and carried is not None else None
+        ),
+    }
 
 
 def _ctags_available() -> bool:
@@ -622,8 +682,16 @@ def get_index_status(repo: str, repo_path: str | None = None) -> dict[str, Any]:
         # Belt over `_capability_fields`' own never-raise: even a bug in the
         # helper must not kill the published status response.
         capability_fields = {"last_index_run": None, "capabilities": None}
+    try:
+        carry_fields = _carry_fields(repo, freshness)
+    except Exception:
+        carry_fields = {
+            "scipMode": "unknown", "carriedFromSha": None, "carryDepth": 0,
+            "carriedDocumentCount": 0, "fullRefreshReason": None,
+        }
     return {"repo": repo, "indexed": indexed, "status": _registry_status(repo),
-            **_freshness_fields(freshness), **_search_coverage_fields(repo),
+            **carry_fields, **_freshness_fields(freshness),
+            **_search_coverage_fields(repo),
             **_indexing_fields(repo, indexed), **capability_fields}
 
 

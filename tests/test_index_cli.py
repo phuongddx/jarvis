@@ -5628,3 +5628,80 @@ def test_manifest_file_hashes_uses_captured_paths():
         source_hash="sh",
     )
     assert _manifest_file_hashes(manifest) == {"a.py": "ha"}
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(_missing, reason=f"missing required binaries: {_missing}")
+def test_watch_carry_then_depth_cap_full_reset(tmp_path: Path, monkeypatch):
+    """Real-toolchain carry cycle: a watch run after an available baseline
+    drops only the changed importing document (plus no closure — b.py
+    defines nothing), publishes depth-1 provenance, and the fifth further
+    carry attempt trips the depth cap back to a full `available` reset."""
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(data_root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True,
+                       capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (repo / "a.py").write_text("class A:\n    def f(self):\n        return 1\n")
+    (repo / "b.py").write_text("from a import A\nA().f()\n")
+    git("add", ".")
+    git("commit", "-qm", "initial")
+
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False) == "carrydemo"
+    reg = Registry(data_root / "registry.db")
+    try:
+        row = reg.get("carrydemo")
+        assert row is not None
+        assert (row.scip_state, row.scip_carry_depth) == ("available", 0)
+    finally:
+        reg.close()
+
+    (repo / "b.py").write_text("from a import A\nA().f()\n# touched\n")
+    assert index_repo(repo, slug="carrydemo", root=data_root,
+                      semantic=False, watch=True) == "carrydemo"
+    reg = Registry(data_root / "registry.db")
+    try:
+        row = reg.get("carrydemo")
+        assert row is not None
+        assert row.scip_state == "carried"
+        assert row.scip_carry_depth == 1
+        assert row.scip_carried_from_sha is not None
+    finally:
+        reg.close()
+
+    slug_dir = config.index_dir("carrydemo", data_root)
+    pointer = (slug_dir / "current").read_text(encoding="utf-8").strip()
+    conn = sqlite3.connect(
+        f"file:{slug_dir / pointer}?mode=ro&immutable=1", uri=True)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] >= 1
+        assert {r[0] for r in conn.execute(
+            "SELECT relative_path FROM documents")} == {"a.py"}
+    finally:
+        conn.close()
+
+    # Depth cap: five more carry-depth generations force a full run
+    # (depths 2..5, then the sixth attempt sees prev depth 5 >= cap).
+    for i in range(5):
+        (repo / "b.py").write_text(f"# touched {i}\n")
+        git("add", ".")
+        git("commit", "-qm", f"t{i}")
+        assert index_repo(repo, slug="carrydemo", root=data_root,
+                          semantic=False, watch=True) == "carrydemo"
+    reg = Registry(data_root / "registry.db")
+    try:
+        row = reg.get("carrydemo")
+        assert row is not None
+        assert (row.scip_state, row.scip_carry_depth) == ("available", 0)
+        assert row.scip_carried_from_sha is None
+    finally:
+        reg.close()

@@ -423,6 +423,51 @@ def test_get_index_status_reports_none_status_when_never_registered():
     assert result["indexed"] is False
 
 
+def test_get_index_status_includes_carry_fields(tmp_path: Path, monkeypatch):
+    """A carried freshness snapshot labels the status carried, with
+    provenance sourced from the registry row plus the live sidecar count;
+    `fullRefreshReason` stays explicitly None on carried rows because a
+    carried generation had no failed full attempt."""
+    from datetime import UTC, datetime
+
+    from jarvis.query import Freshness, FreshnessSnapshot
+    from jarvis.registry import Registry, ScipStageFields
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+
+    class _CarriedStub:
+        def get_index_status(self, repo, repo_path=None):
+            return True, FreshnessSnapshot(
+                commit="abc123",
+                generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                stale=False,
+                freshness=Freshness.FRESH,
+                checked_at=datetime.now(UTC),
+                scip_carried_from_sha="prev000",
+            )
+
+    monkeypatch.setattr(server, "_query_service", _CarriedStub())
+
+    registry = Registry(config.data_dir() / "registry.db")
+    try:
+        registry.upsert(
+            "demo", "/p", "python", "abc123", "indexed",
+            scip_stage=ScipStageFields(
+                state="carried", carried_from_sha="prev000", carry_depth=1,
+            ),
+        )
+    finally:
+        registry.close()
+
+    payload = server.get_index_status(repo="demo")
+
+    assert payload["scipMode"] == "carried"
+    assert payload["carriedFromSha"] == "prev000"
+    assert payload["carryDepth"] == 1
+    assert payload["carriedDocumentCount"] == 0  # no live SCIP db on disk
+    assert payload["fullRefreshReason"] is None
+
+
 
 
 
