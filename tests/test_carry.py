@@ -120,6 +120,26 @@ def test_build_keeps_unaffected_doc_with_sidecar(tmp_path):
         conn.close()
 
 
+def test_build_from_carried_copy_drops_stale_sidecar_rows(tmp_path):
+    """Chained carries read a carried copy whose carried_documents rows
+    reference soon-deleted documents: those sidecar rows must go BEFORE
+    documents, or foreign-key enforcement fails the second carry."""
+    from jarvis.carry import build_carried_snapshot
+
+    build_prev_snapshot(tmp_path / "prev.db")
+    build_carried_snapshot(tmp_path / "prev.db", tmp_path / "c1.db",
+                           drop={"a.py"}, prev_sha="prev000")
+    build_carried_snapshot(tmp_path / "c1.db", tmp_path / "c2.db",
+                           drop={"b.py"}, prev_sha="prev000")
+    conn = sqlite3.connect(tmp_path / "c2.db")
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM carried_documents").fetchone()[0] == 0
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+
 def test_published_metadata_reads_pointer_target(tmp_path):
     from jarvis.carry import pointer_target, published_metadata
 

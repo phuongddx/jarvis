@@ -140,6 +140,14 @@ def build_carried_snapshot(prev_db: Path, dest: Path, drop: set[str],
                 conn.execute(
                     f"DELETE FROM defn_enclosing_ranges WHERE document_id IN ({id_marks})",
                     args)
+                # Chained carries read a carried copy: its sidecar rows
+                # reference the documents being deleted and must go first.
+                if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='carried_documents'").fetchone() is not None:
+                    conn.execute(
+                        f"DELETE FROM carried_documents "
+                        f"WHERE document_id IN ({id_marks})", args)
                 conn.execute(
                     f"DELETE FROM documents WHERE id IN ({id_marks})", args)
         conn.execute(
