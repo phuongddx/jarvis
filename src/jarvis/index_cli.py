@@ -1656,8 +1656,8 @@ def _index_repo_locked(
                                     "SELECT 1 FROM sqlite_master WHERE "
                                     "type='table' AND name='syntax_files'"
                                 ).fetchone() is not None:
-                                    carried_conn.execute("DELETE FROM syntax_files")
                                     carried_conn.execute("DELETE FROM syntax_symbols")
+                                    carried_conn.execute("DELETE FROM syntax_files")
                                     carried_conn.commit()
                             finally:
                                 carried_conn.close()
@@ -1668,10 +1668,19 @@ def _index_repo_locked(
                                 "carried_from_sha": prev_origin,
                                 "carry_depth": prev_meta.carry_depth,
                             }
-                    except (sqlite3.Error, OSError):
-                        # Bad SQLite state or scratch-copy I/O must never
-                        # fail a watch run; the full attempt remains the
-                        # safe fallback.
+                    except (sqlite3.Error, OSError) as carry_exc:
+                        # Spec failure model: an unreadable previous
+                        # snapshot is observable, then the full attempt is
+                        # the safe fallback.
+                        # A distinct name avoids Python's implicit deletion
+                        # of `exc` colliding with the pipeline's outer
+                        # exception handler.
+                        print(
+                            f"warning: {slug}: previous SCIP snapshot "
+                            f"unreadable; running full SCIP enrichment: "
+                            f"{carry_exc}",
+                            file=sys.stderr,
+                        )
                         attempt = None
 
             if attempt_scip and (attempt is None or attempt.state != "carried"):
@@ -1775,34 +1784,57 @@ def _index_repo_locked(
             finally:
                 graph_store.close()
 
+            # Terminal stage decision before publication so the metadata
+            # uses the exact state the registry is about to record. A
+            # suppressed run (stage=None) mirrors the preserved prior state.
+            stage = _terminal_stage_fields(
+                attempt, scip_enabled, sha, carry_ctx,
+                scip_supported=scip_supported, suppressed=suppressed,
+            )
+            if stage is not None:
+                scip_mode = stage.state
+            elif existing is not None and existing.scip_state:
+                scip_mode = existing.scip_state
+            else:
+                scip_mode = "unavailable"
+
             # -- Stage 7: publish (scratch build -> unique names -> flip) -
             target_dir = config.index_dir(slug, root)
             target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(final_db, target_dir / versioned_name)
-            scip_mode = attempt.state if attempt is not None else "unavailable"
-            carried_sha = carry_ctx["carried_from_sha"] if carry_ctx else None
-            carry_depth = (carry_ctx["carry_depth"] + 1) if carry_ctx else 0
-            (target_dir / _metadata_name(versioned_name)).write_text(
-                json.dumps(_publish_metadata_payload(
-                    slug=slug, sha=sha, published_at=published_at,
-                    generation=generation, source_hash=manifest.source_hash,
-                    scip_mode=scip_mode, carried_from_sha=carried_sha,
-                    carry_depth=carry_depth,
-                )),
-                encoding="utf-8",
+            current_meta = published_metadata(target_dir)
+            preserve_carried = (
+                attempt is not None
+                and attempt.state in ("failed", "unavailable")
+                and current_meta is not None
+                and current_meta.scip_mode == "carried"
             )
-            _publish_atomically(target_dir, versioned_name)
-            published = True
-
-        # Terminal stage decision (spec TSI-06 vocabulary). An explicit
-        # ScipStageFields is the ONLY writer of the stage columns, so a
-        # successful baseline bookkeeping can never erase an active SCIP
-        # failure (narrowed D-04): successful enrichment clears its own
-        # fields; a suppressed run passes None and preserves them.
-        stage = _terminal_stage_fields(
-            attempt, scip_enabled, sha, carry_ctx,
-            scip_supported=scip_supported, suppressed=suppressed,
-        )
+            if preserve_carried:
+                # The scratch result is worse than the live precise index.
+                # Keep every published byte; cleanup below keeps this same
+                # pointer target while recording the failed stage attempt.
+                versioned_name = (target_dir / "current").read_text(
+                    encoding="utf-8").strip()
+                print(
+                    f"warning: {slug}: full SCIP enrichment "
+                    f"{attempt.state}; preserving the current carried "
+                    "snapshot",
+                    file=sys.stderr,
+                )
+            else:
+                shutil.copy(final_db, target_dir / versioned_name)
+                carried_sha = carry_ctx["carried_from_sha"] if carry_ctx else None
+                carry_depth = (carry_ctx["carry_depth"] + 1) if carry_ctx else 0
+                (target_dir / _metadata_name(versioned_name)).write_text(
+                    json.dumps(_publish_metadata_payload(
+                        slug=slug, sha=sha, published_at=published_at,
+                        generation=generation, source_hash=manifest.source_hash,
+                        scip_mode=scip_mode, carried_from_sha=carried_sha,
+                        carry_depth=carry_depth,
+                    )),
+                    encoding="utf-8",
+                )
+                _publish_atomically(target_dir, versioned_name)
+                published = True
 
         if attempt is not None and attempt.state in ("failed", "unavailable"):
             final_status = DEGRADED_STATUS
@@ -1842,7 +1874,9 @@ def _index_repo_locked(
                 f"jarvis index {repo_path} --scip",
                 file=sys.stderr,
             )
-        elif attempt is not None and attempt.state not in ("available", "carried"):
+        elif (attempt is not None
+                and attempt.state not in ("available", "carried")
+                and published):
             print(
                 f"warning: {slug}: SCIP enrichment {attempt.state} — "
                 f"{attempt.reason}. The syntax baseline and search were "
