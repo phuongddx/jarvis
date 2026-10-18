@@ -1,6 +1,6 @@
 # Spec: Incremental reindex (no-op guard + SCIP carry-forward)
 
-Status: approved <!-- draft | approved | shipped | superseded -->
+Status: shipped <!-- draft | approved | shipped | superseded -->
 Date: 2026-10-18
 Intent: [intent.md](intent.md)
 
