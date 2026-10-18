@@ -22,6 +22,40 @@ from tests.fixtures.synthetic_index import (
 )
 
 
+def test_metadata_defaults_when_carry_keys_absent():
+    from jarvis.index_reader import IndexMetadata
+
+    meta = IndexMetadata.from_json(
+        {
+            "project": "_",
+            "repo": "demo",
+            "branch": "_",
+            "commit_sha": "abc",
+            "published_at": "2026-10-18T00:00:00Z",
+        }
+    )
+    assert (meta.scip_mode, meta.carried_from_sha, meta.carry_depth) == (None, None, 0)
+
+
+def test_metadata_parses_carry_fields():
+    from jarvis.index_reader import IndexMetadata
+
+    meta = IndexMetadata.from_json(
+        {
+            "project": "_",
+            "repo": "demo",
+            "branch": "_",
+            "commit_sha": "abc",
+            "scip_mode": "carried",
+            "carried_from_sha": "prev000",
+            "carry_depth": 3,
+        }
+    )
+    assert meta.scip_mode == "carried"
+    assert meta.carried_from_sha == "prev000"
+    assert meta.carry_depth == 3
+
+
 def test_read_pointer_missing_raises_index_not_found(tmp_path: Path):
     with pytest.raises(IndexNotFoundError):
         read_pointer(str(tmp_path), "nope", "nope", "main")
